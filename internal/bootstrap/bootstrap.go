@@ -49,11 +49,5 @@ func Init(ctx context.Context, opts Options) (*app.Runtime, error) {
 		return nil, err
 	}
 
-	return &app.Runtime{
-		Paths:   paths,
-		Config:  cfg,
-		Logger:  logResult.Logger,
-		DB:      db,
-		logFile: logResult.File,
-	}, nil
+	return app.NewRuntime(paths, cfg, logResult.Logger, db, logResult.File), nil
 }

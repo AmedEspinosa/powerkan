@@ -21,6 +21,17 @@ type closer interface {
 	Close() error
 }
 
+// NewRuntime constructs a runtime with managed resources.
+func NewRuntime(paths platform.Paths, cfg config.Config, logger *slog.Logger, db *sql.DB, logFile closer) *Runtime {
+	return &Runtime{
+		Paths:   paths,
+		Config:  cfg,
+		Logger:  logger,
+		DB:      db,
+		logFile: logFile,
+	}
+}
+
 // Close releases runtime resources.
 func (r *Runtime) Close() error {
 	var firstErr error
