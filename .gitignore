@@ -1,0 +1,7 @@
+/powerkan
+/dist/
+/coverage.out
+*.test
+
+# Local app config may contain secrets.
+config.yaml

@@ -1,0 +1,14 @@
+app:
+  timezone: Local
+
+exports:
+  default_dir: ""
+
+ticket_id:
+  timestamp_format: YYMMDDHHmm
+
+webhook:
+  endpoint_url: ""
+  timeout_seconds: 10
+  max_retries: 3
+  retry_backoff_seconds: 5
