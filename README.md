@@ -42,7 +42,7 @@ _(Instructions will be updated as binary distribution is finalized. For now, run
 
 3. **Run the application:**
    ```bash
-   go run main.go
+   go run ./cmd/powerkan
    ```
 
 ## ⌨️ Keybindings (Default)
