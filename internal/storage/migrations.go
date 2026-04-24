@@ -82,27 +82,33 @@ CREATE TABLE IF NOT EXISTS schema_version (
 	}
 
 	for _, migration := range migrations {
-		applied, err := migrationApplied(ctx, db, migration.version)
-		if err != nil {
-			return err
-		}
-		if applied {
-			continue
-		}
-
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("begin migration %d: %w", migration.version, err)
 		}
 
+		result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(?, CURRENT_TIMESTAMP)`, migration.version)
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("claim migration %d: %w", migration.version, err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("inspect migration %d claim: %w", migration.version, err)
+		}
+
+		if rowsAffected == 0 {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit skipped migration %d: %w", migration.version, err)
+			}
+			continue
+		}
+
 		if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %d: %w", migration.version, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_version(version, applied_at) VALUES(?, CURRENT_TIMESTAMP)`, migration.version); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("record migration %d: %w", migration.version, err)
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -111,13 +117,4 @@ CREATE TABLE IF NOT EXISTS schema_version (
 	}
 
 	return nil
-}
-
-func migrationApplied(ctx context.Context, db *sql.DB, version int) (bool, error) {
-	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(1) FROM schema_version WHERE version = ?`, version).Scan(&count); err != nil {
-		return false, fmt.Errorf("check migration %d: %w", version, err)
-	}
-
-	return count > 0, nil
 }

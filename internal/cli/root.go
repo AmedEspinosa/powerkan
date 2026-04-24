@@ -14,6 +14,10 @@ import (
 	"github.com/amedespinosa/powerkan/internal/tui"
 )
 
+var isTerminal = func(fd uintptr) bool {
+	return term.IsTerminal(int(fd))
+}
+
 type rootFlags struct {
 	configPath string
 	verbose    bool
@@ -29,6 +33,10 @@ func NewRootCommand() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if !hasInteractiveTerminal() {
+				return fmt.Errorf("powerkan TUI requires an interactive terminal")
+			}
+
 			rt, err := bootstrap.Init(context.Background(), bootstrap.Options{
 				ConfigPath: flags.configPath,
 				Verbose:    flags.verbose,
@@ -42,10 +50,6 @@ func NewRootCommand() *cobra.Command {
 				tui.NewModel(rt.Config, rt.Paths),
 				tea.WithAltScreen(),
 			)
-
-			if !term.IsTerminal(int(os.Stdout.Fd())) {
-				return fmt.Errorf("powerkan TUI requires an interactive terminal")
-			}
 
 			_, err = p.Run()
 			return err
@@ -66,4 +70,8 @@ func NewRootCommand() *cobra.Command {
 	})
 
 	return cmd
+}
+
+func hasInteractiveTerminal() bool {
+	return isTerminal(os.Stdin.Fd()) && isTerminal(os.Stdout.Fd())
 }
