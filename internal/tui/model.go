@@ -75,10 +75,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.activeRoute = routeTicketDetail
 				return m, nil
 			}
-		case "H", "left":
+		case "H":
 			m.activeRoute = previousRoute(m.activeRoute)
 			return m, nil
-		case "L", "right":
+		case "L":
 			m.activeRoute = nextRoute(m.activeRoute)
 			return m, nil
 		}
@@ -176,9 +176,9 @@ func renderHeader(width int, active route) string {
 }
 
 func renderFooter(width int, active route) string {
-	help := "h/j/k/l navigate  H/L switch screens  Enter open  q quit"
+	help := "H/L switch screens  1-4 jump routes  q quit"
 	if active == routeBoard {
-		help = "h/j/k/l focus board  H/L switch screens  Enter open detail  q quit"
+		help = "h/l or left/right focus board  H/L switch screens  Enter open detail  q quit"
 	}
 
 	style := lipgloss.NewStyle().
