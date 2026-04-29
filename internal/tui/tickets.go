@@ -194,10 +194,6 @@ func (m Model) handleDetailNormalKey(msg tea.KeyMsg) Model {
 		m.activeRoute = m.previousRoute
 		m.mode = modeNormal
 		m.detail.editingField = false
-	case "enter":
-		if m.selectedTicket != nil {
-			return m.openDetail(m.selectedTicket.TicketID)
-		}
 	}
 	return m
 }

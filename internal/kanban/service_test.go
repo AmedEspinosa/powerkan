@@ -230,6 +230,18 @@ func TestBoardMetricsAndReorder(t *testing.T) {
 	}
 }
 
+func TestParseTimestampPreservesRFC3339ClockTime(t *testing.T) {
+	t.Parallel()
+
+	parsed, err := parseTimestamp("2026-04-24T10:16:17-04:00")
+	if err != nil {
+		t.Fatalf("parseTimestamp returned error: %v", err)
+	}
+	if parsed.Hour() != 10 || parsed.Minute() != 16 || parsed.Second() != 17 {
+		t.Fatalf("expected RFC3339 time preserved, got %s", parsed.Format(time.RFC3339))
+	}
+}
+
 func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	t.Parallel()
 
@@ -248,8 +260,31 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTicket returned error: %v", err)
 	}
+	service.SetNowFunc(func() time.Time {
+		return time.Date(2026, 4, 24, 10, 16, 17, 0, time.FixedZone("EDT", -4*60*60))
+	})
 	if _, err := service.AddComment(context.Background(), ticket.TicketID, AddCommentInput{Kind: CommentKindText, Body: "Looks good"}); err != nil {
 		t.Fatalf("AddComment returned error: %v", err)
+	}
+	service.SetNowFunc(func() time.Time {
+		return time.Date(2026, 4, 24, 10, 17, 18, 0, time.FixedZone("EDT", -4*60*60))
+	})
+	if _, err := service.AddComment(context.Background(), ticket.TicketID, AddCommentInput{Kind: CommentKindURL, Body: "https://example.com/export"}); err != nil {
+		t.Fatalf("AddComment returned error: %v", err)
+	}
+
+	detail, err := service.GetTicketDetail(context.Background(), ticket.TicketID)
+	if err != nil {
+		t.Fatalf("GetTicketDetail returned error: %v", err)
+	}
+	if len(detail.Comments) != 2 {
+		t.Fatalf("expected 2 comments, got %d", len(detail.Comments))
+	}
+	if detail.Comments[0].CreatedAt.Format(time.RFC3339) != "2026-04-24T14:17:18Z" {
+		t.Fatalf("expected newest comment timestamp preserved, got %s", detail.Comments[0].CreatedAt.Format(time.RFC3339))
+	}
+	if detail.Comments[1].CreatedAt.Format(time.RFC3339) != "2026-04-24T14:16:17Z" {
+		t.Fatalf("expected older comment timestamp preserved, got %s", detail.Comments[1].CreatedAt.Format(time.RFC3339))
 	}
 
 	mdPath, err := service.ExportTicketMarkdown(context.Background(), ticket.TicketID, "")
@@ -263,6 +298,12 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	if !strings.Contains(string(mdData), "## Comments") {
 		t.Fatalf("expected markdown comments section, got %q", string(mdData))
 	}
+	if !strings.Contains(string(mdData), "2026-04-24T14:17:18Z [URL] https://example.com/export") {
+		t.Fatalf("expected markdown to preserve newest comment timestamp, got %q", string(mdData))
+	}
+	if !strings.Contains(string(mdData), "2026-04-24T14:16:17Z [TEXT] Looks good") {
+		t.Fatalf("expected markdown to preserve older comment timestamp, got %q", string(mdData))
+	}
 
 	csvPath, err := service.ExportTicketCSV(context.Background(), ticket.TicketID, "")
 	if err != nil {
@@ -274,6 +315,12 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	}
 	if !strings.Contains(string(csvData), "ticket_id,title,status") {
 		t.Fatalf("expected CSV header row, got %q", string(csvData))
+	}
+	if !strings.Contains(string(csvData), "2026-04-24T14:17:18Z|URL|https://example.com/export") {
+		t.Fatalf("expected CSV to preserve newest comment timestamp, got %q", string(csvData))
+	}
+	if !strings.Contains(string(csvData), "2026-04-24T14:16:17Z|TEXT|Looks good") {
+		t.Fatalf("expected CSV to preserve older comment timestamp, got %q", string(csvData))
 	}
 }
 

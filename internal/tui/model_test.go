@@ -113,6 +113,21 @@ func TestQuitKeyReturnsTeaQuitCommand(t *testing.T) {
 	}
 }
 
+func TestInsertModeQAppendsInsteadOfQuitting(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	model = updated.(Model)
+	if cmd != nil {
+		t.Fatal("expected no quit command in insert mode")
+	}
+	if model.board.searchQuery != "q" {
+		t.Fatalf("expected insert mode to append q, got %q", model.board.searchQuery)
+	}
+}
+
 func TestModelNumericRouteSwitching(t *testing.T) {
 	t.Parallel()
 
@@ -205,6 +220,49 @@ func TestTableEnterOpensDetailForFocusedTicket(t *testing.T) {
 	}
 	if model.selectedTicket == nil {
 		t.Fatal("expected selected ticket in detail route")
+	}
+}
+
+func TestDetailEnterPreservesBackNavigation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("board", func(t *testing.T) {
+		model := newTestModel(t)
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+		if model.activeRoute != routeTicketDetail {
+			t.Fatalf("expected detail route, got %v", model.activeRoute)
+		}
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
+		if model.activeRoute != routeBoard {
+			t.Fatalf("expected escape to return to board, got %v", model.activeRoute)
+		}
+	})
+
+	t.Run("tickets", func(t *testing.T) {
+		model := newTestModel(t)
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+		if model.activeRoute != routeTicketDetail {
+			t.Fatalf("expected detail route, got %v", model.activeRoute)
+		}
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
+		if model.activeRoute != routeTickets {
+			t.Fatalf("expected escape to return to tickets, got %v", model.activeRoute)
+		}
+	})
+}
+
+func TestRenderSprintPanelShowsStoredPercentValue(t *testing.T) {
+	t.Parallel()
+
+	view := renderSprintPanel(48, 12, kanban.BoardMetrics{PercentCompleted: 50})
+	if !strings.Contains(view, "% of Points Completed: 50.00%") {
+		t.Fatalf("expected rendered sprint percent, got %q", view)
+	}
+	if strings.Contains(view, "5000.00%") {
+		t.Fatalf("expected no double-scaled percent, got %q", view)
 	}
 }
 

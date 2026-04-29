@@ -1059,7 +1059,7 @@ func parseTimestamp(value string) (time.Time, error) {
 		return time.Time{}, nil
 	}
 	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
-		return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, time.Local), nil
+		return parsed, nil
 	}
 	return time.Parse("2006-01-02 15:04:05", value)
 }

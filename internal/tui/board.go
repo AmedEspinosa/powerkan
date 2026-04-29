@@ -112,7 +112,7 @@ func renderSprintPanel(width, height int, metrics kanban.BoardMetrics) string {
 	}
 	stats := []string{
 		fmt.Sprintf("Sprint Days Left: %d", metrics.DaysLeft),
-		fmt.Sprintf("%% of Points Completed: %.2f%%", metrics.PercentCompleted*100),
+		fmt.Sprintf("%% of Points Completed: %.2f%%", metrics.PercentCompleted),
 		fmt.Sprintf("Points Per Day: %.2f", metrics.PointsPerDay),
 	}
 	box := lipgloss.NewStyle().Width(width).Height(height).Padding(1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250"))

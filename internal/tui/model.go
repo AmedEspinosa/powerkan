@@ -130,7 +130,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case tea.KeyMsg:
-		if msg.String() == "ctrl+c" || msg.String() == "q" {
+		if m.mode == modeNormal && (msg.String() == "ctrl+c" || msg.String() == "q") {
 			return m, tea.Quit
 		}
 		return m.handleKey(msg), nil
@@ -394,7 +394,9 @@ func (m Model) openDetail(ticketID string) Model {
 	if ticketID == "" {
 		return m
 	}
-	m.previousRoute = m.activeRoute
+	if m.activeRoute != routeTicketDetail {
+		m.previousRoute = m.activeRoute
+	}
 	m.activeRoute = routeTicketDetail
 	m.mode = modeNormal
 	m.loadSelectedTicket(ticketID)
