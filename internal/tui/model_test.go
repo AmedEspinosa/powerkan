@@ -97,6 +97,22 @@ func TestNewModelStartsOnBoard(t *testing.T) {
 	}
 }
 
+func TestQuitKeyReturnsTeaQuitCommand(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if _, ok := updated.(Model); !ok {
+		t.Fatalf("expected updated model type, got %T", updated)
+	}
+	if cmd == nil {
+		t.Fatal("expected quit command, got nil")
+	}
+	if msg := cmd(); msg != tea.Quit() {
+		t.Fatalf("expected tea.Quit message, got %T", msg)
+	}
+}
+
 func TestModelNumericRouteSwitching(t *testing.T) {
 	t.Parallel()
 

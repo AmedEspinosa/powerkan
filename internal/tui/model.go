@@ -130,6 +130,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" || msg.String() == "q" {
+			return m, tea.Quit
+		}
 		return m.handleKey(msg), nil
 	}
 	return m, nil
@@ -153,8 +156,6 @@ func (m Model) handleKey(msg tea.KeyMsg) Model {
 	}
 
 	switch msg.String() {
-	case "ctrl+c", "q":
-		return m.withQuit()
 	case "1":
 		m.activeRoute = routeBoard
 		m.mode = modeNormal
@@ -427,10 +428,6 @@ func (m Model) selectedTableTicket() *kanban.Ticket {
 	}
 	ticket := m.tickets.data.Tickets[m.tickets.focusedRow]
 	return &ticket
-}
-
-func (m Model) withQuit() Model {
-	return m
 }
 
 func routeTitle(r route) string {
