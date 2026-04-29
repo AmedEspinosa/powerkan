@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS webhook_posts (
 );
 `,
 	},
+	{
+		version: 2,
+		sql: `
+ALTER TABLE tickets ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // ApplyMigrations creates the schema_version table and applies pending migrations.

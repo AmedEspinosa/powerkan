@@ -1,84 +1,192 @@
-# Powerkan ⚡️
+# Powerkan
 
-> 🚧 **Work in Progress:** This is a personal project in early active development, serving as a hands-on exploration of Go and terminal UI architecture. Expect breaking changes, missing features, and rough edges!
+Powerkan is a local-first, keyboard-centric terminal Kanban application for managing developer tickets and active sprints. It is built with Go, Bubble Tea, Lip Gloss, and SQLite.
 
-Powerkan (Power User + Kanban) is a local-first, keyboard-centric terminal (TUI) Kanban application. It is designed for developers who want a fast, zero-distraction environment to manage their sprints and tickets entirely from the command line, without the overhead of heavy web-based trackers.
+The current repo state is an MVP-focused beta:
 
-Built with **Go**, **Bubble Tea**, and **SQLite**.
+- Service-backed TUI with Board, Tickets, Ticket Detail, and Export screens
+- SQLite storage with automated migrations
+- Ticket movement across board columns with persistence
+- Inline table editing and full ticket detail editing
+- Ticket export to Markdown or CSV
+- Sprint-end webhook delivery for cron-based reporting
 
-## ✨ Features
+## Current MVP Scope
 
-- **Terminal-Native TUI:** A beautiful, responsive interface built with Charmbracelet's Bubble Tea and Lip Gloss.
-- **Keyboard-Centric:** Fully navigable without a mouse. Uses standard `h/j/k/l` bindings for movement and intuitive shortcuts for actions.
-- **Local-First & Fast:** Data is stored locally in SQLite (`~/Library/Application Support/powerkan/`). No cloud syncing, no latency, no internet required.
-- **Sprint & Backlog Management:** \* Dedicated Active Sprint Board with 4 core columns (Not Started, In Progress, Under Review, Done).
-  - Auto-calculated KPIs (points completed, points per day, days remaining).
-  - Robust Backlog view with filtering by Epic/Parent and Status.
-- **Developer-Friendly Integrations:**
-  - Export individual tickets to Markdown or CSV.
-  - Cron-triggered webhooks to automatically report end-of-sprint metrics to external services (Make, Notion, etc.).
-- **Smart Ticket IDs:** Auto-generated structured IDs (e.g., `APP-FEA-2604130915`) based on Epic, Type, and Timestamp.
+### TUI Routes
 
-## 🚀 Installation & Setup
+- `1` Board
+- `2` Sprints
+- `3` Tickets
+- `4` Export
 
-_(Instructions will be updated as binary distribution is finalized. For now, run from source.)_
+`Sprints` is still a placeholder route in the TUI. Ticket Detail is a subview opened from Board or Tickets with `Enter`.
 
-1. **Clone the repository:**
+### Board View
 
-   ```bash
-   git clone [https://github.com/yourusername/powerkan.git](https://github.com/yourusername/powerkan.git)
-   cd powerkan
-   ```
+- Active sprint board with four columns:
+  - `Not Started`
+  - `In Progress`
+  - `Under Review`
+  - `Completed`
+- Read-only sprint stats panel
+- Read-only selected ticket details panel
+- Local board search over ticket title + description
+- Local board blocked-only filter
+- Ticket movement across statuses with `H` and `L`
 
-2. **Set up your configuration:**
-   Powerkan requires a `config.yaml` file for webhook endpoints and app settings. This file is ignored by Git to protect your secrets.
+### Tickets View
 
-   ```bash
-   mkdir -p ~/Library/Application\ Support/powerkan/
-   cp config.example.yaml ~/Library/Application\ Support/powerkan/config.yaml
-   ```
+- Tabular ticket list
+- Row and column navigation
+- Inline editing for editable cells
+- `Enter` opens the focused ticket in Ticket Detail
 
-   _Edit `config.yaml` with your preferred settings._
+### Ticket Detail View
 
-3. **Run the application:**
-   ```bash
-   go run ./cmd/powerkan
-   ```
+- Field-by-field ticket editing
+- Comment creation
+- Back navigation to the previous route
 
-## ⌨️ Keybindings (Default)
+### Export View
 
-Powerkan is designed to keep your hands on the home row:
+- Exports the currently selected/open ticket
+- Formats:
+  - Markdown
+  - CSV
 
-- `h` / `j` / `k` / `l`: Navigate Left / Down / Up / Right
-- `Enter`: Open / Select focused item
-- `e`: Edit focused item (ticket, field)
-- `a`: Add / Create a new ticket or epic
-- `d`: Delete (requires confirmation)
-- `J` / `K`: Reorder items within a column or list
-- `q` / `Ctrl+C`: Quit application
+## Keyboard Model
 
-## 🛠 Architecture & CLI Usage
+Powerkan uses a strict split between `Normal` mode and `Insert` mode.
 
-Powerkan acts as both the TUI launcher and a CLI utility for scripting.
+- In `Normal` mode, single-key shortcuts trigger navigation and actions.
+- In `Insert` mode, typed characters go into the active field instead of triggering shortcuts.
+- `Esc` cancels the active edit and returns to `Normal` mode.
+- `Enter` saves the active edit and returns to `Normal` mode.
 
-**Launch TUI:**
+## Keybindings
+
+### Global
+
+- `1` Board
+- `2` Sprints
+- `3` Tickets
+- `4` Export
+- `q` or `Ctrl+C` quit
+
+### Board
+
+- `h` / `l` move focus between columns
+- `j` / `k` move focus within the current column
+- `H` move the selected ticket left
+- `L` move the selected ticket right
+- `s` edit board search
+- `f` toggle blocked-only filter
+- `Enter` open Ticket Detail
+
+### Tickets
+
+- `h` / `l` move between columns
+- `j` / `k` move between rows
+- `i` or `e` edit the focused cell
+- `Enter` open Ticket Detail
+
+### Ticket Detail
+
+- `j` / `k` move between fields
+- `i` or `e` edit the focused field
+- `Esc` cancel edit or return to previous screen
+- `Enter` save the active field edit
+
+### Export
+
+- `h` / `l` switch export format
+- `Enter` export the current ticket
+
+## Installation and Setup
+
+Run from source for now.
+
+1. Clone the repository.
+
+```bash
+git clone https://github.com/yourusername/powerkan.git
+cd powerkan
+```
+
+2. Create the application config.
+
+```bash
+mkdir -p ~/Library/Application\ Support/powerkan/
+cp config.example.yaml ~/Library/Application\ Support/powerkan/config.yaml
+```
+
+3. Edit `config.yaml` as needed.
+
+4. Run the application.
+
+```bash
+go run ./cmd/powerkan
+```
+
+## CLI Usage
+
+### Launch TUI
 
 ```bash
 powerkan
 ```
 
-**Export a ticket:**
+### Export a Ticket
 
 ```bash
 powerkan export ticket --id <TICKET_ID> --format md
+powerkan export ticket --id <TICKET_ID> --format csv
 ```
 
-**Trigger Sprint-End Webhook (Designed for cron):**
+Optional output path:
+
+```bash
+powerkan export ticket --id <TICKET_ID> --format md --out /tmp/ticket.md
+```
+
+### Post Sprint-End Webhooks
 
 ```bash
 powerkan webhook sprint-end
 ```
 
-## 🤝 Contributing
+Specific sprint:
 
-This project is currently a solo learning endeavor focused on mastering Go and the Bubble Tea framework. While pull requests are not actively being sought at this very early stage, feedback, architecture discussions, and issue reports are highly welcome!
+```bash
+powerkan webhook sprint-end --sprint 12
+```
+
+Bypass idempotency:
+
+```bash
+powerkan webhook sprint-end --force
+```
+
+## Storage
+
+- SQLite database and app files live under `~/Library/Application Support/powerkan/`
+- Schema migrations run automatically at startup
+- Ticket exports default to the configured exports directory
+
+## Known MVP Gaps
+
+- `Sprints` route is still a placeholder
+- Board filter UI is limited to blocked-only toggle
+- Board search/filter state is local to the board and does not affect the tickets table
+- Calendar widget is still a placeholder
+- No GitHub sync yet
+- No advanced table virtualization yet
+
+## Development
+
+Run the test suite:
+
+```bash
+go test ./...
+```

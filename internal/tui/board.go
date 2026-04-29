@@ -1,93 +1,246 @@
 package tui
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/amedespinosa/powerkan/internal/kanban"
 )
 
-var boardStatuses = []string{
-	"NOT_STARTED",
-	"IN_PROGRESS",
-	"UNDER_REVIEW",
-	"DONE",
+var boardStatuses = []kanban.TicketStatus{
+	kanban.TicketStatusNotStarted,
+	kanban.TicketStatusInProgress,
+	kanban.TicketStatusUnderReview,
+	kanban.TicketStatusDone,
 }
 
-type boardModel struct {
-	focusedColumn int
-}
-
-func newBoardModel() boardModel {
-	return boardModel{}
-}
-
-func (m boardModel) Update(msg tea.KeyMsg) (boardModel, tea.Cmd) {
+func (m Model) handleBoardNormalKey(msg tea.KeyMsg) Model {
 	switch msg.String() {
 	case "h", "left":
-		if m.focusedColumn > 0 {
-			m.focusedColumn--
+		if m.board.focusedColumn > 0 {
+			m.board.focusedColumn--
+			m.restoreBoardSelection("")
 		}
 	case "l", "right":
-		if m.focusedColumn < len(boardStatuses)-1 {
-			m.focusedColumn++
+		if m.board.focusedColumn < len(m.board.filtered)-1 {
+			m.board.focusedColumn++
+			m.restoreBoardSelection("")
+		}
+	case "j", "down":
+		column := m.currentBoardColumn()
+		if len(column.Tickets) > 0 && m.board.focusedRows[m.board.focusedColumn] < len(column.Tickets)-1 {
+			m.board.focusedRows[m.board.focusedColumn]++
+			m.loadSelectedTicket(column.Tickets[m.board.focusedRows[m.board.focusedColumn]].TicketID)
+		}
+	case "k", "up":
+		column := m.currentBoardColumn()
+		if len(column.Tickets) > 0 && m.board.focusedRows[m.board.focusedColumn] > 0 {
+			m.board.focusedRows[m.board.focusedColumn]--
+			m.loadSelectedTicket(column.Tickets[m.board.focusedRows[m.board.focusedColumn]].TicketID)
+		}
+	case "H":
+		if selected := m.selectedBoardTicket(); selected != nil {
+			detail, err := m.service.MoveTicket(contextBackground(), selected.TicketID, -1)
+			if err != nil {
+				m.errorMessage = err.Error()
+				return m
+			}
+			m.statusMessage = "Moved " + detail.TicketID + " to " + boardDisplayTitle(detail.Status)
+			m.refreshBoard(detail.TicketID)
+			m.refreshTickets()
+			m.loadSelectedTicket(detail.TicketID)
+		}
+	case "L":
+		if selected := m.selectedBoardTicket(); selected != nil {
+			detail, err := m.service.MoveTicket(contextBackground(), selected.TicketID, 1)
+			if err != nil {
+				m.errorMessage = err.Error()
+				return m
+			}
+			m.statusMessage = "Moved " + detail.TicketID + " to " + boardDisplayTitle(detail.Status)
+			m.refreshBoard(detail.TicketID)
+			m.refreshTickets()
+			m.loadSelectedTicket(detail.TicketID)
+		}
+	case "s":
+		m.mode = modeInsert
+		m.statusMessage = "Editing board search"
+	case "f":
+		m.board.filter.blockedOnly = !m.board.filter.blockedOnly
+		m.applyBoardFilters()
+		m.restoreBoardSelection("")
+		if m.board.filter.blockedOnly {
+			m.statusMessage = "Board filter: blocked only"
+		} else {
+			m.statusMessage = "Board filter cleared"
+		}
+	case "enter":
+		if selected := m.selectedBoardTicket(); selected != nil {
+			return m.openDetail(selected.TicketID)
+		}
+	}
+	return m
+}
+
+func (m Model) boardView(width, height int) string {
+	leftWidth := max(width/3, 38)
+	rightWidth := max(width-leftWidth-1, 40)
+
+	sprintPanel := renderSprintPanel(leftWidth, max(10, height/4), m.board.data.Metrics)
+	detailPanel := renderSelectedTicketPanel(leftWidth, height-lipgloss.Height(sprintPanel), m.selectedTicket)
+	left := lipgloss.JoinVertical(lipgloss.Left, sprintPanel, detailPanel)
+	right := renderBoardColumns(rightWidth, height, m.board.filtered, m.board.focusedColumn, m.board.focusedRows)
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+}
+
+func renderSprintPanel(width, height int, metrics kanban.BoardMetrics) string {
+	title := "No Active Sprint"
+	rangeText := "No sprint scheduled"
+	if metrics.Sprint != nil {
+		title = metrics.Sprint.Name
+		rangeText = fmt.Sprintf("%s - %s", metrics.Sprint.StartDate.Format("Jan 2"), metrics.Sprint.EndDate.Format("Jan 2"))
+	}
+	calendar := []string{
+		"[] [] [] [] [] [] []",
+		"[] [] [] [] [] [] []",
+		"[] [] [] [] [] [] []",
+		"Phase 2 calendar placeholder",
+	}
+	stats := []string{
+		fmt.Sprintf("Sprint Days Left: %d", metrics.DaysLeft),
+		fmt.Sprintf("%% of Points Completed: %.2f%%", metrics.PercentCompleted*100),
+		fmt.Sprintf("Points Per Day: %.2f", metrics.PointsPerDay),
+	}
+	box := lipgloss.NewStyle().Width(width).Height(height).Padding(1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250"))
+	titleStyle := lipgloss.NewStyle().Bold(true)
+	return box.Render(lipgloss.JoinVertical(lipgloss.Left,
+		titleStyle.Render(title),
+		rangeText,
+		"",
+		strings.Join(calendar, "\n"),
+		"",
+		strings.Join(stats, "\n"),
+	))
+}
+
+func renderSelectedTicketPanel(width, height int, ticket *kanban.TicketDetail) string {
+	box := lipgloss.NewStyle().Width(width).Height(height).Padding(1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250"))
+	if ticket == nil {
+		return box.Render("No ticket selected")
+	}
+
+	commentLines := []string{"Comments:"}
+	if len(ticket.Comments) == 0 {
+		commentLines = append(commentLines, "  None")
+	} else {
+		for _, comment := range ticket.Comments {
+			commentLines = append(commentLines, "  - "+comment.Body)
 		}
 	}
 
-	return m, nil
+	sprint := "Backlog"
+	if ticket.SprintID != nil {
+		sprint = ticket.SprintName
+	}
+	pr := ticket.GitHubPRURL
+	if pr == "" {
+		pr = "-"
+	}
+	return box.Render(lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Bold(true).Render(ticket.TicketID),
+		ticket.Title,
+		"",
+		"Description:",
+		ticket.Description,
+		"",
+		fmt.Sprintf("Story Points: %d", ticket.StoryPoints),
+		fmt.Sprintf("Flag: %t", ticket.Blocked),
+		fmt.Sprintf("Parent: %s", ticket.EpicName),
+		fmt.Sprintf("Type: %s", ticket.Type),
+		fmt.Sprintf("Github PR: %s", pr),
+		fmt.Sprintf("Sprint: %s", sprint),
+		"",
+		strings.Join(commentLines, "\n"),
+	))
 }
 
-func (m boardModel) View(width, height int) string {
-	containerStyle := lipgloss.NewStyle().Width(width).Height(height).Padding(1, 1)
-	header := renderBoardHeader(width - 2)
-	columns := renderBoardColumns(width-2, max(height-6, 8), m.focusedColumn)
-	return containerStyle.Render(lipgloss.JoinVertical(lipgloss.Left, header, columns))
-}
-
-func renderBoardHeader(width int) string {
-	box := lipgloss.NewStyle().
-		Width(width).
-		Padding(0, 1).
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("240"))
-
-	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229")).Render("Active Sprint Board")
-	meta := lipgloss.NewStyle().Foreground(lipgloss.Color("246")).Render(
-		"Sprint: Unassigned  |  Days Left: --  |  % Complete: --  |  Points/Day: --",
-	)
-
-	return box.Render(lipgloss.JoinVertical(lipgloss.Left, title, meta))
-}
-
-func renderBoardColumns(width, height, focused int) string {
+func renderBoardColumns(width, height int, columns []kanban.BoardColumn, focused int, focusedRows []int) string {
 	gap := 1
-	columnWidth := max((width-(gap*(len(boardStatuses)-1)))/len(boardStatuses), 18)
-	columns := make([]string, 0, len(boardStatuses))
+	columnWidth := max((width-(gap*(len(boardStatuses)-1)))/len(boardStatuses), 20)
+	rendered := make([]string, 0, len(boardStatuses))
+	for idx, column := range columns {
+		titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("255"))
+		borderColor := lipgloss.Color("250")
+		if idx == focused {
+			borderColor = lipgloss.Color("208")
+			titleStyle = titleStyle.Foreground(lipgloss.Color("208"))
+		}
 
-	for idx, status := range boardStatuses {
-		titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229"))
-		bodyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
-		columnStyle := lipgloss.NewStyle().
+		cards := make([]string, 0, max(1, len(column.Tickets)))
+		if len(column.Tickets) == 0 {
+			empty := lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("No tickets")
+			if idx == focused {
+				empty = lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Render("No tickets")
+			}
+			cards = append(cards, empty)
+		}
+		for rowIdx, ticket := range column.Tickets {
+			cardBorder := lipgloss.Color("245")
+			if idx == focused && rowIdx == focusedRows[idx] {
+				cardBorder = lipgloss.Color("208")
+			}
+			card := lipgloss.NewStyle().
+				Width(columnWidth-4).
+				Padding(0, 1).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(cardBorder).
+				Render(lipgloss.JoinVertical(lipgloss.Left,
+					ticket.TicketID,
+					ticket.Title,
+					ticket.EpicName,
+					fmt.Sprintf("%d pts", ticket.StoryPoints),
+				))
+			cards = append(cards, card)
+		}
+
+		columnBox := lipgloss.NewStyle().
 			Width(columnWidth).
 			Height(height).
-			Padding(1, 1).
+			Padding(0, 0).
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("240"))
-
-		if idx == focused {
-			columnStyle = columnStyle.BorderForeground(lipgloss.Color("62"))
-			titleStyle = titleStyle.Foreground(lipgloss.Color("86"))
-		}
-
-		content := lipgloss.JoinVertical(
-			lipgloss.Left,
-			titleStyle.Render(status),
-			bodyStyle.Render("No tickets yet"),
-			bodyStyle.Render("Press Enter to open the ticket detail placeholder."),
-			bodyStyle.Render(fmt.Sprintf("Focused column: %d/%d", idx+1, len(boardStatuses))),
-		)
-		columns = append(columns, columnStyle.Render(content))
+			BorderForeground(borderColor).
+			Render(lipgloss.JoinVertical(lipgloss.Left, titleStyle.Render(boardDisplayTitle(column.Status)), strings.Join(cards, "\n")))
+		rendered = append(rendered, columnBox)
 	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, rendered...)
+}
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, columns...)
+func (m Model) currentBoardColumn() kanban.BoardColumn {
+	if len(m.board.filtered) == 0 || m.board.focusedColumn >= len(m.board.filtered) {
+		return kanban.BoardColumn{}
+	}
+	return m.board.filtered[m.board.focusedColumn]
+}
+
+func boardDisplayTitle(status kanban.TicketStatus) string {
+	switch status {
+	case kanban.TicketStatusNotStarted:
+		return "Not Started"
+	case kanban.TicketStatusInProgress:
+		return "In Progress"
+	case kanban.TicketStatusUnderReview:
+		return "Under Review"
+	case kanban.TicketStatusDone:
+		return "Completed"
+	default:
+		return string(status)
+	}
+}
+
+func contextBackground() context.Context {
+	return context.Background()
 }
