@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/amedespinosa/powerkan/internal/bootstrap"
+	"github.com/amedespinosa/powerkan/internal/kanban"
 )
 
 func newWebhookCommand(flags *rootFlags) *cobra.Command {
@@ -37,7 +38,23 @@ func newWebhookSprintEndCommand(flags *rootFlags) *cobra.Command {
 			defer func() { _ = rt.Close() }()
 
 			rt.Logger.Info("webhook sprint-end invoked", "sprint_id", sprintID, "force", force)
-			return fmt.Errorf("webhook sprint-end command is %w", errPhase0NotImplemented)
+			service := kanban.NewService(rt.DB, rt.Config)
+			results, err := service.PostSprintEndWebhooks(context.Background(), sprintID, force)
+			if err != nil {
+				return err
+			}
+
+			for _, result := range results {
+				if result.Skipped {
+					_, _ = fmt.Fprintf(cmd.OutOrStdout(), "skipped sprint %d\n", result.SprintID)
+					continue
+				}
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "posted sprint %d\n", result.SprintID)
+			}
+			if len(results) == 0 {
+				_, _ = fmt.Fprintln(cmd.OutOrStdout(), "no ended sprints to post")
+			}
+			return nil
 		},
 	}
 

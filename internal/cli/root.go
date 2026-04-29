@@ -11,6 +11,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/amedespinosa/powerkan/internal/bootstrap"
+	"github.com/amedespinosa/powerkan/internal/kanban"
 	"github.com/amedespinosa/powerkan/internal/tui"
 )
 
@@ -47,7 +48,11 @@ func NewRootCommand() *cobra.Command {
 			defer func() { _ = rt.Close() }()
 
 			p := tea.NewProgram(
-				tui.NewModel(rt.Config, rt.Paths),
+				tui.NewModel(tui.Dependencies{
+					Config:  rt.Config,
+					Paths:   rt.Paths,
+					Service: kanban.NewService(rt.DB, rt.Config),
+				}),
 				tea.WithAltScreen(),
 			)
 

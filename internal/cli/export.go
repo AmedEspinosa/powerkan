@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/amedespinosa/powerkan/internal/bootstrap"
+	"github.com/amedespinosa/powerkan/internal/kanban"
 )
 
 func newExportCommand(flags *rootFlags) *cobra.Command {
@@ -43,7 +44,21 @@ func newExportTicketCommand(flags *rootFlags) *cobra.Command {
 			defer func() { _ = rt.Close() }()
 
 			rt.Logger.Info("export ticket invoked", "ticket_id", ticketID, "format", format, "out", out)
-			return fmt.Errorf("export ticket command is %w", errPhase0NotImplemented)
+			service := kanban.NewService(rt.DB, rt.Config)
+
+			var exportedPath string
+			switch strings.ToLower(format) {
+			case "md":
+				exportedPath, err = service.ExportTicketMarkdown(context.Background(), ticketID, out)
+			case "csv":
+				exportedPath, err = service.ExportTicketCSV(context.Background(), ticketID, out)
+			}
+			if err != nil {
+				return err
+			}
+
+			_, _ = fmt.Fprintln(cmd.OutOrStdout(), exportedPath)
+			return nil
 		},
 	}
 
