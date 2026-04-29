@@ -62,6 +62,7 @@ type boardModel struct {
 	focusedColumn int
 	focusedRows   []int
 	searchQuery   string
+	originalQuery string
 	filter        boardFilter
 }
 
@@ -115,7 +116,6 @@ func NewModel(deps Dependencies) Model {
 		mode:          modeNormal,
 		export:        exportModel{format: "md"},
 	}
-	m.refreshSupportData()
 	m.refreshBoard("")
 	m.refreshTickets()
 	return m
@@ -192,6 +192,12 @@ func (m Model) handleInsertKey(msg tea.KeyMsg) Model {
 	switch msg.String() {
 	case "esc":
 		m.mode = modeNormal
+		if m.activeRoute == routeBoard {
+			m.board.searchQuery = m.board.originalQuery
+			m.applyBoardFilters()
+			m.restoreBoardSelection(m.currentSelectedTicketID())
+			return m
+		}
 		m.cancelEdit()
 		return m
 	case "enter":
@@ -229,6 +235,7 @@ func (m *Model) updateActiveBuffer(value string) {
 	case m.activeRoute == routeBoard:
 		m.board.searchQuery = value
 		m.applyBoardFilters()
+		m.restoreBoardSelection(m.currentSelectedTicketID())
 	case m.activeRoute == routeTickets && m.tickets.editingCell:
 		m.tickets.editingValue = value
 	case m.activeRoute == routeTicketDetail && m.detail.editingField:
@@ -251,6 +258,7 @@ func (m Model) commitEdit() Model {
 	switch {
 	case m.activeRoute == routeBoard:
 		m.applyBoardFilters()
+		m.restoreBoardSelection(m.currentSelectedTicketID())
 		return m
 	case m.activeRoute == routeTickets && m.tickets.editingCell:
 		return m.commitTableEdit()
@@ -308,15 +316,25 @@ func (m *Model) refreshTickets() {
 	}
 	m.errorMessage = ""
 	m.tickets.data = result
-	m.refreshSupportData()
 	if m.tickets.focusedRow >= len(result.Tickets) {
 		m.tickets.focusedRow = max(0, len(result.Tickets)-1)
 	}
 }
 
 func (m *Model) loadSelectedTicket(ticketID string) {
+	m.loadSelectedTicketWithForce(ticketID, false)
+}
+
+func (m *Model) reloadSelectedTicket(ticketID string) {
+	m.loadSelectedTicketWithForce(ticketID, true)
+}
+
+func (m *Model) loadSelectedTicketWithForce(ticketID string, force bool) {
 	if m.service == nil || ticketID == "" {
 		m.selectedTicket = nil
+		return
+	}
+	if !force && m.selectedTicket != nil && m.selectedTicket.TicketID == ticketID {
 		return
 	}
 	detail, err := m.service.GetTicketDetail(context.Background(), ticketID)
@@ -356,6 +374,18 @@ func (m *Model) restoreBoardSelection(preferTicketID string) {
 
 	column := m.board.filtered[m.board.focusedColumn]
 	if len(column.Tickets) == 0 {
+		for idx, candidate := range m.board.filtered {
+			if len(candidate.Tickets) == 0 {
+				continue
+			}
+			m.board.focusedColumn = idx
+			m.board.focusedRows[idx] = min(m.board.focusedRows[idx], len(candidate.Tickets)-1)
+			if m.board.focusedRows[idx] < 0 {
+				m.board.focusedRows[idx] = 0
+			}
+			m.loadSelectedTicket(candidate.Tickets[m.board.focusedRows[idx]].TicketID)
+			return
+		}
 		m.selectedTicket = nil
 		return
 	}
@@ -366,6 +396,13 @@ func (m *Model) restoreBoardSelection(preferTicketID string) {
 		m.board.focusedRows[m.board.focusedColumn] = 0
 	}
 	m.loadSelectedTicket(column.Tickets[m.board.focusedRows[m.board.focusedColumn]].TicketID)
+}
+
+func (m Model) currentSelectedTicketID() string {
+	if m.selectedTicket == nil {
+		return ""
+	}
+	return m.selectedTicket.TicketID
 }
 
 func (m *Model) applyBoardFilters() {

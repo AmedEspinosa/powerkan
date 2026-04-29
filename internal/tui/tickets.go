@@ -19,7 +19,7 @@ var ticketTableColumns = []string{
 	"Story Points",
 	"Sprint",
 	"Flag",
-	"Github PR",
+	"GitHub PR",
 }
 
 var detailFields = []string{
@@ -31,29 +31,32 @@ var detailFields = []string{
 	"Type",
 	"Sprint",
 	"Blocked",
-	"Github PR URL",
+	"GitHub PR URL",
 	"New Comment",
 }
 
 func (m Model) handleTicketsNormalKey(msg tea.KeyMsg) Model {
-	switch msg.String() {
-	case "j", "down":
+	rowChanged := false
+	switch {
+	case msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
 		if m.tickets.focusedRow < len(m.tickets.data.Tickets)-1 {
 			m.tickets.focusedRow++
+			rowChanged = true
 		}
-	case "k", "up":
+	case msg.String() == "k" || msg.String() == "up" || msg.Type == tea.KeyUp:
 		if m.tickets.focusedRow > 0 {
 			m.tickets.focusedRow--
+			rowChanged = true
 		}
-	case "h", "left":
+	case msg.String() == "h" || msg.String() == "left" || msg.Type == tea.KeyLeft:
 		if m.tickets.focusedColumn > 0 {
 			m.tickets.focusedColumn--
 		}
-	case "l", "right":
+	case msg.String() == "l" || msg.String() == "right" || msg.Type == tea.KeyRight:
 		if m.tickets.focusedColumn < len(ticketTableColumns)-1 {
 			m.tickets.focusedColumn++
 		}
-	case "i", "e":
+	case msg.String() == "i" || msg.String() == "e":
 		if selected := m.selectedTableTicket(); selected != nil && m.tickets.focusedColumn > 0 {
 			m.mode = modeInsert
 			m.tickets.editingCell = true
@@ -61,13 +64,19 @@ func (m Model) handleTicketsNormalKey(msg tea.KeyMsg) Model {
 			m.tickets.editingValue = m.tickets.originalValue
 			m.statusMessage = "Editing table cell"
 		}
-	case "enter":
+	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
 		if selected := m.selectedTableTicket(); selected != nil {
 			return m.openDetail(selected.TicketID)
 		}
 	}
-	if selected := m.selectedTableTicket(); selected != nil {
-		m.loadSelectedTicket(selected.TicketID)
+	if rowChanged {
+		if selected := m.selectedTableTicket(); selected != nil {
+			m.loadSelectedTicket(selected.TicketID)
+		}
+	} else if m.selectedTicket == nil {
+		if selected := m.selectedTableTicket(); selected != nil {
+			m.loadSelectedTicket(selected.TicketID)
+		}
 	}
 	return m
 }
@@ -168,21 +177,20 @@ func (m Model) commitTableEdit() Model {
 	m.tickets.editingCell = false
 	m.refreshBoard(detail.TicketID)
 	m.refreshTickets()
-	m.loadSelectedTicket(detail.TicketID)
 	return m
 }
 
 func (m Model) handleDetailNormalKey(msg tea.KeyMsg) Model {
-	switch msg.String() {
-	case "j", "down":
+	switch {
+	case msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
 		if m.detail.focusedField < len(detailFields)-1 {
 			m.detail.focusedField++
 		}
-	case "k", "up":
+	case msg.String() == "k" || msg.String() == "up" || msg.Type == tea.KeyUp:
 		if m.detail.focusedField > 0 {
 			m.detail.focusedField--
 		}
-	case "i", "e":
+	case msg.String() == "i" || msg.String() == "e":
 		if m.selectedTicket != nil {
 			m.mode = modeInsert
 			m.detail.editingField = true
@@ -190,7 +198,7 @@ func (m Model) handleDetailNormalKey(msg tea.KeyMsg) Model {
 			m.detail.editingValue = m.detail.originalValue
 			m.statusMessage = "Editing detail field"
 		}
-	case "esc":
+	case msg.String() == "esc" || msg.Type == tea.KeyEsc:
 		m.activeRoute = m.previousRoute
 		m.mode = modeNormal
 		m.detail.editingField = false
@@ -248,9 +256,8 @@ func (m Model) commitDetailEdit() Model {
 		}
 		m.detail.editingField = false
 		m.statusMessage = "Comment added"
-		m.loadSelectedTicket(m.selectedTicket.TicketID)
+		m.reloadSelectedTicket(m.selectedTicket.TicketID)
 		m.detail.ticket = *m.selectedTicket
-		m.refreshBoard(m.selectedTicket.TicketID)
 		return m
 	}
 
@@ -322,14 +329,14 @@ func (m Model) commitDetailEdit() Model {
 }
 
 func (m Model) handleExportNormalKey(msg tea.KeyMsg) Model {
-	switch msg.String() {
-	case "h", "left", "l", "right":
+	switch {
+	case msg.String() == "h" || msg.String() == "left" || msg.Type == tea.KeyLeft || msg.String() == "l" || msg.String() == "right" || msg.Type == tea.KeyRight:
 		if m.export.format == "md" {
 			m.export.format = "csv"
 		} else {
 			m.export.format = "md"
 		}
-	case "enter":
+	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
 		if m.selectedTicket == nil {
 			m.statusMessage = "Select a ticket before exporting"
 			return m

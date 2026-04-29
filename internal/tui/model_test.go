@@ -286,3 +286,251 @@ func TestFooterHelpMatchesCurrentBoardBindings(t *testing.T) {
 		t.Fatalf("expected board footer bindings, got %q", view)
 	}
 }
+
+func TestBoardSearchEscRestoresOriginalQuery(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for _, r := range "backend" {
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.board.searchQuery != "backend" {
+		t.Fatalf("expected committed query backend, got %q", model.board.searchQuery)
+	}
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for _, r := range " ship" {
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
+
+	if model.board.searchQuery != "backend" {
+		t.Fatalf("expected escape to restore backend query, got %q", model.board.searchQuery)
+	}
+	if model.mode != modeNormal {
+		t.Fatalf("expected normal mode after escape, got %v", model.mode)
+	}
+}
+
+func TestBoardSearchTypingKeepsSelectionValidWhenFilteredSetShrinks(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
+	if selected := model.selectedBoardTicket(); selected == nil || selected.TicketID == "" {
+		t.Fatal("expected ticket selected before filtering")
+	}
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for _, r := range "ship" {
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+
+	selected := model.selectedBoardTicket()
+	if selected == nil {
+		t.Fatal("expected selected board ticket after filtering")
+	}
+	if selected.Title != "Ship Sprint Demo" {
+		t.Fatalf("expected filtered selection to move to Ship Sprint Demo, got %s", selected.Title)
+	}
+	if model.selectedTicket == nil || model.selectedTicket.TicketID != selected.TicketID {
+		t.Fatalf("expected selected ticket detail to match focused card, got %+v", model.selectedTicket)
+	}
+	if model.board.focusedColumn != 3 {
+		t.Fatalf("expected focus to clamp to done column, got %d", model.board.focusedColumn)
+	}
+}
+
+func TestBoardSearchCommitKeepsSelectionClamped(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for _, r := range "ship" {
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+
+	selected := model.selectedBoardTicket()
+	if selected == nil || selected.Title != "Ship Sprint Demo" {
+		t.Fatalf("expected selected board ticket Ship Sprint Demo after commit, got %+v", selected)
+	}
+	if model.selectedTicket == nil || model.selectedTicket.Title != "Ship Sprint Demo" {
+		t.Fatalf("expected selected detail Ship Sprint Demo after commit, got %+v", model.selectedTicket)
+	}
+	if model.mode != modeNormal {
+		t.Fatalf("expected normal mode after commit, got %v", model.mode)
+	}
+}
+
+func TestTicketsNavigationOnlyFetchesDetailOnRowChange(t *testing.T) {
+	t.Parallel()
+
+	service := newCountingService()
+	model := NewModel(Dependencies{Config: config.Config{}, Paths: platform.Paths{}, Service: service})
+	initialCalls := service.getTicketDetailCalls
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if service.getTicketDetailCalls != initialCalls {
+		t.Fatalf("expected no detail fetch on column move or edit entry, got %d want %d", service.getTicketDetailCalls, initialCalls)
+	}
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyDown})
+	if service.getTicketDetailCalls != initialCalls+1 {
+		t.Fatalf("expected one detail fetch on row change, got %d want %d", service.getTicketDetailCalls, initialCalls+1)
+	}
+}
+
+func TestNewModelUsesListTicketsAsSupportDataSource(t *testing.T) {
+	t.Parallel()
+
+	service := newCountingService()
+	model := NewModel(Dependencies{Config: config.Config{}, Paths: platform.Paths{}, Service: service})
+
+	if len(model.tickets.data.Epics) == 0 || len(model.tickets.data.Sprints) == 0 {
+		t.Fatalf("expected support data from ListTickets, got %+v", model.tickets.data)
+	}
+	if service.listTicketsCalls != 1 {
+		t.Fatalf("expected one ListTickets call, got %d", service.listTicketsCalls)
+	}
+	if service.listEpicsCalls != 0 {
+		t.Fatalf("expected no ListEpics call, got %d", service.listEpicsCalls)
+	}
+	if service.listSprintsCalls != 0 {
+		t.Fatalf("expected no ListSprints call, got %d", service.listSprintsCalls)
+	}
+}
+
+func TestRenderedLabelsUseGitHubSpelling(t *testing.T) {
+	t.Parallel()
+
+	ticket := &kanban.TicketDetail{Ticket: kanban.Ticket{
+		TicketID:    "TICKET-001",
+		Title:       "Title",
+		Description: "Description",
+		EpicName:    "Epic",
+		Type:        kanban.TicketTypeFeature,
+		GitHubPRURL: "https://example.com/pr",
+	}}
+	panel := renderSelectedTicketPanel(60, 20, ticket)
+	if strings.Contains(panel, "Github") {
+		t.Fatalf("expected GitHub spelling in board panel, got %q", panel)
+	}
+	if !strings.Contains(panel, "GitHub PR: https://example.com/pr") {
+		t.Fatalf("expected GitHub label in board panel, got %q", panel)
+	}
+	if strings.Contains(strings.Join(ticketTableColumns, "\n"), "Github") {
+		t.Fatalf("expected GitHub spelling in ticket table headers, got %v", ticketTableColumns)
+	}
+	if strings.Contains(strings.Join(detailFields, "\n"), "Github") {
+		t.Fatalf("expected GitHub spelling in detail fields, got %v", detailFields)
+	}
+}
+
+type countingService struct {
+	boardData            kanban.BoardData
+	ticketList           kanban.TicketListResult
+	details              map[string]kanban.TicketDetail
+	getTicketDetailCalls int
+	listTicketsCalls     int
+	listEpicsCalls       int
+	listSprintsCalls     int
+}
+
+func newCountingService() *countingService {
+	ticket1 := kanban.Ticket{
+		ID:          1,
+		TicketID:    "TICKET-001",
+		Title:       "One",
+		Status:      kanban.TicketStatusNotStarted,
+		Type:        kanban.TicketTypeFeature,
+		EpicID:      1,
+		EpicName:    "Epic One",
+		GitHubPRURL: "https://example.com/1",
+	}
+	ticket2 := kanban.Ticket{
+		ID:          2,
+		TicketID:    "TICKET-002",
+		Title:       "Two",
+		Status:      kanban.TicketStatusInProgress,
+		Type:        kanban.TicketTypeBug,
+		EpicID:      1,
+		EpicName:    "Epic One",
+		GitHubPRURL: "https://example.com/2",
+	}
+	columns := make([]kanban.BoardColumn, 0, len(boardStatuses))
+	for _, status := range boardStatuses {
+		column := kanban.BoardColumn{Status: status}
+		switch status {
+		case kanban.TicketStatusNotStarted:
+			column.Tickets = []kanban.Ticket{ticket1}
+		case kanban.TicketStatusInProgress:
+			column.Tickets = []kanban.Ticket{ticket2}
+		}
+		columns = append(columns, column)
+	}
+	return &countingService{
+		boardData: kanban.BoardData{Columns: columns},
+		ticketList: kanban.TicketListResult{
+			Tickets: []kanban.Ticket{ticket1, ticket2},
+			Epics:   []kanban.Epic{{ID: 1, Name: "Epic One"}},
+			Sprints: []kanban.Sprint{{ID: 1, Name: "Sprint One"}},
+		},
+		details: map[string]kanban.TicketDetail{
+			ticket1.TicketID: {Ticket: ticket1},
+			ticket2.TicketID: {Ticket: ticket2},
+		},
+	}
+}
+
+func (s *countingService) LoadBoard(context.Context) (kanban.BoardData, error) {
+	return s.boardData, nil
+}
+
+func (s *countingService) ListTickets(context.Context, kanban.TicketListFilters) (kanban.TicketListResult, error) {
+	s.listTicketsCalls++
+	return s.ticketList, nil
+}
+
+func (s *countingService) GetTicketDetail(_ context.Context, ticketID string) (kanban.TicketDetail, error) {
+	s.getTicketDetailCalls++
+	return s.details[ticketID], nil
+}
+
+func (s *countingService) UpdateTicket(context.Context, string, kanban.UpdateTicketInput) (kanban.TicketDetail, error) {
+	return kanban.TicketDetail{}, nil
+}
+
+func (s *countingService) MoveTicket(context.Context, string, int) (kanban.TicketDetail, error) {
+	return kanban.TicketDetail{}, nil
+}
+
+func (s *countingService) AddComment(context.Context, string, kanban.AddCommentInput) (kanban.TicketComment, error) {
+	return kanban.TicketComment{}, nil
+}
+
+func (s *countingService) ListEpics(context.Context) ([]kanban.Epic, error) {
+	s.listEpicsCalls++
+	return s.ticketList.Epics, nil
+}
+
+func (s *countingService) ListSprints(context.Context, kanban.SprintListFilters) ([]kanban.SprintSummary, error) {
+	s.listSprintsCalls++
+	return nil, nil
+}
+
+func (s *countingService) ExportTicketMarkdown(context.Context, string, string) (string, error) {
+	return "", nil
+}
+
+func (s *countingService) ExportTicketCSV(context.Context, string, string) (string, error) {
+	return "", nil
+}

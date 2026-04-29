@@ -9,6 +9,7 @@ import (
 type migration struct {
 	version int
 	sql     string
+	run     func(context.Context, *sql.Tx) error
 }
 
 var migrations = []migration{
@@ -75,6 +76,10 @@ CREATE TABLE IF NOT EXISTS webhook_posts (
 ALTER TABLE tickets ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 3,
+		run:     backfillTicketPositions,
+	},
 }
 
 // ApplyMigrations creates the schema_version table and applies pending migrations.
@@ -112,9 +117,17 @@ CREATE TABLE IF NOT EXISTS schema_version (
 			continue
 		}
 
-		if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("apply migration %d: %w", migration.version, err)
+		if migration.sql != "" {
+			if _, err := tx.ExecContext(ctx, migration.sql); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("apply migration %d: %w", migration.version, err)
+			}
+		}
+		if migration.run != nil {
+			if err := migration.run(ctx, tx); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("apply migration %d: %w", migration.version, err)
+			}
 		}
 
 		if err := tx.Commit(); err != nil {
@@ -123,4 +136,52 @@ CREATE TABLE IF NOT EXISTS schema_version (
 	}
 
 	return nil
+}
+
+type ticketPositionRow struct {
+	id       int64
+	status   string
+	sprintID sql.NullInt64
+}
+
+func backfillTicketPositions(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+SELECT id, status, sprint_id
+FROM tickets
+ORDER BY status, COALESCE(sprint_id, -1), COALESCE(position, 0), updated_at DESC, id DESC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	updateStmt, err := tx.PrepareContext(ctx, `UPDATE tickets SET position = ? WHERE id = ?`)
+	if err != nil {
+		return err
+	}
+	defer updateStmt.Close()
+
+	var (
+		currentKey string
+		nextPos    int
+	)
+	for rows.Next() {
+		var row ticketPositionRow
+		if err := rows.Scan(&row.id, &row.status, &row.sprintID); err != nil {
+			return err
+		}
+		key := row.status + "|backlog"
+		if row.sprintID.Valid {
+			key = fmt.Sprintf("%s|%d", row.status, row.sprintID.Int64)
+		}
+		if key != currentKey {
+			currentKey = key
+			nextPos = 0
+		}
+		if _, err := updateStmt.ExecContext(ctx, nextPos, row.id); err != nil {
+			return err
+		}
+		nextPos++
+	}
+
+	return rows.Err()
 }

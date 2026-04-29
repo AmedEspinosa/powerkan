@@ -19,30 +19,30 @@ var boardStatuses = []kanban.TicketStatus{
 }
 
 func (m Model) handleBoardNormalKey(msg tea.KeyMsg) Model {
-	switch msg.String() {
-	case "h", "left":
+	switch {
+	case msg.String() == "h" || msg.String() == "left" || msg.Type == tea.KeyLeft:
 		if m.board.focusedColumn > 0 {
 			m.board.focusedColumn--
 			m.restoreBoardSelection("")
 		}
-	case "l", "right":
+	case msg.String() == "l" || msg.String() == "right" || msg.Type == tea.KeyRight:
 		if m.board.focusedColumn < len(m.board.filtered)-1 {
 			m.board.focusedColumn++
 			m.restoreBoardSelection("")
 		}
-	case "j", "down":
+	case msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
 		column := m.currentBoardColumn()
 		if len(column.Tickets) > 0 && m.board.focusedRows[m.board.focusedColumn] < len(column.Tickets)-1 {
 			m.board.focusedRows[m.board.focusedColumn]++
 			m.loadSelectedTicket(column.Tickets[m.board.focusedRows[m.board.focusedColumn]].TicketID)
 		}
-	case "k", "up":
+	case msg.String() == "k" || msg.String() == "up" || msg.Type == tea.KeyUp:
 		column := m.currentBoardColumn()
 		if len(column.Tickets) > 0 && m.board.focusedRows[m.board.focusedColumn] > 0 {
 			m.board.focusedRows[m.board.focusedColumn]--
 			m.loadSelectedTicket(column.Tickets[m.board.focusedRows[m.board.focusedColumn]].TicketID)
 		}
-	case "H":
+	case msg.String() == "H":
 		if selected := m.selectedBoardTicket(); selected != nil {
 			detail, err := m.service.MoveTicket(contextBackground(), selected.TicketID, -1)
 			if err != nil {
@@ -52,9 +52,8 @@ func (m Model) handleBoardNormalKey(msg tea.KeyMsg) Model {
 			m.statusMessage = "Moved " + detail.TicketID + " to " + boardDisplayTitle(detail.Status)
 			m.refreshBoard(detail.TicketID)
 			m.refreshTickets()
-			m.loadSelectedTicket(detail.TicketID)
 		}
-	case "L":
+	case msg.String() == "L":
 		if selected := m.selectedBoardTicket(); selected != nil {
 			detail, err := m.service.MoveTicket(contextBackground(), selected.TicketID, 1)
 			if err != nil {
@@ -64,21 +63,21 @@ func (m Model) handleBoardNormalKey(msg tea.KeyMsg) Model {
 			m.statusMessage = "Moved " + detail.TicketID + " to " + boardDisplayTitle(detail.Status)
 			m.refreshBoard(detail.TicketID)
 			m.refreshTickets()
-			m.loadSelectedTicket(detail.TicketID)
 		}
-	case "s":
+	case msg.String() == "s":
 		m.mode = modeInsert
+		m.board.originalQuery = m.board.searchQuery
 		m.statusMessage = "Editing board search"
-	case "f":
+	case msg.String() == "f":
 		m.board.filter.blockedOnly = !m.board.filter.blockedOnly
 		m.applyBoardFilters()
-		m.restoreBoardSelection("")
+		m.restoreBoardSelection(m.currentSelectedTicketID())
 		if m.board.filter.blockedOnly {
 			m.statusMessage = "Board filter: blocked only"
 		} else {
 			m.statusMessage = "Board filter cleared"
 		}
-	case "enter":
+	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
 		if selected := m.selectedBoardTicket(); selected != nil {
 			return m.openDetail(selected.TicketID)
 		}
@@ -161,7 +160,7 @@ func renderSelectedTicketPanel(width, height int, ticket *kanban.TicketDetail) s
 		fmt.Sprintf("Flag: %t", ticket.Blocked),
 		fmt.Sprintf("Parent: %s", ticket.EpicName),
 		fmt.Sprintf("Type: %s", ticket.Type),
-		fmt.Sprintf("Github PR: %s", pr),
+		fmt.Sprintf("GitHub PR: %s", pr),
 		fmt.Sprintf("Sprint: %s", sprint),
 		"",
 		strings.Join(commentLines, "\n"),
