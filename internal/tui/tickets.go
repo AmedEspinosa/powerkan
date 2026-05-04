@@ -64,6 +64,8 @@ func (m Model) handleTicketsNormalKey(msg tea.KeyMsg) Model {
 			m.tickets.editingValue = m.tickets.originalValue
 			m.statusMessage = "Editing table cell"
 		}
+	case msg.String() == "n":
+		return m.openCreateTicket(routeTickets, nil)
 	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
 		if selected := m.selectedTableTicket(); selected != nil {
 			return m.openDetail(selected.TicketID)

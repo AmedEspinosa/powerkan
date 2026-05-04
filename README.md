@@ -80,6 +80,7 @@ Powerkan uses a strict split between `Normal` mode and `Insert` mode.
 - `j` / `k` move focus within the current column
 - `H` move the selected ticket left
 - `L` move the selected ticket right
+- `n` create a new ticket
 - `s` edit board search
 - `f` toggle blocked-only filter
 - `Enter` open Ticket Detail
@@ -89,6 +90,7 @@ Powerkan uses a strict split between `Normal` mode and `Insert` mode.
 - `h` / `l` move between columns
 - `j` / `k` move between rows
 - `i` or `e` edit the focused cell
+- `n` create a new ticket
 - `Enter` open Ticket Detail
 
 ### Ticket Detail
@@ -137,6 +139,21 @@ go run ./cmd/powerkan
 powerkan
 ```
 
+### Create a Ticket
+
+Press `n` on the Board or Tickets route to open the shared Create Ticket flow.
+
+The create form supports:
+
+- required title
+- ticket type selection
+- story points
+- description
+- epic picker
+- sprint picker with `Backlog`
+
+If the database has no epics yet, Powerkan automatically creates and selects a default `Inbox` epic.
+
 ### Export a Ticket
 
 ```bash
@@ -180,6 +197,7 @@ powerkan webhook sprint-end --force
 - Board filter UI is limited to blocked-only toggle
 - Board search/filter state is local to the board and does not affect the tickets table
 - Calendar widget is still a placeholder
+- Ticket creation is not available in the TUI yet
 - No GitHub sync yet
 - No advanced table virtualization yet
 

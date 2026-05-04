@@ -28,6 +28,8 @@ var (
 	ErrWebhookNotConfigured = errors.New("webhook endpoint_url is not configured")
 )
 
+const DefaultEpicName = "Inbox"
+
 type Service struct {
 	db     *sql.DB
 	config config.Config
@@ -242,6 +244,22 @@ func (s *Service) ListEpics(ctx context.Context) ([]Epic, error) {
 	return epics, rows.Err()
 }
 
+func (s *Service) EnsureDefaultEpic(ctx context.Context) (Epic, error) {
+	epics, err := s.ListEpics(ctx)
+	if err != nil {
+		return Epic{}, err
+	}
+	if len(epics) == 0 {
+		return s.CreateEpic(ctx, CreateEpicInput{Name: DefaultEpicName})
+	}
+	for _, epic := range epics {
+		if strings.EqualFold(epic.Name, DefaultEpicName) {
+			return epic, nil
+		}
+	}
+	return epics[0], nil
+}
+
 func (s *Service) DeleteEpic(ctx context.Context, id int64) error {
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM tickets WHERE epic_id = ?`, id).Scan(&count); err != nil {
@@ -435,6 +453,10 @@ func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (Ti
 		return TicketDetail{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	if err := validateCreateTicketInput(ctx, tx, input); err != nil {
+		return TicketDetail{}, err
+	}
 
 	epicName, err := lookupEpicName(ctx, tx, input.EpicID)
 	if err != nil {
@@ -1083,6 +1105,55 @@ func lookupEpicName(ctx context.Context, tx *sql.Tx, epicID int64) (string, erro
 		return "", err
 	}
 	return name, nil
+}
+
+func validateCreateTicketInput(ctx context.Context, tx *sql.Tx, input CreateTicketInput) error {
+	if strings.TrimSpace(input.Title) == "" {
+		return fmt.Errorf("title is required")
+	}
+	if !isValidTicketStatus(input.Status) {
+		return fmt.Errorf("invalid ticket status %q", input.Status)
+	}
+	if !isValidTicketType(input.Type) {
+		return fmt.Errorf("invalid ticket type %q", input.Type)
+	}
+	if input.StoryPoints < 0 {
+		return fmt.Errorf("story points must be greater than or equal to 0")
+	}
+	if _, err := lookupEpicName(ctx, tx, input.EpicID); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("unknown epic id %d", input.EpicID)
+		}
+		return err
+	}
+	if input.SprintID != nil {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE id = ?`, *input.SprintID).Scan(&count); err != nil {
+			return err
+		}
+		if count == 0 {
+			return fmt.Errorf("unknown sprint id %d", *input.SprintID)
+		}
+	}
+	return nil
+}
+
+func isValidTicketStatus(status TicketStatus) bool {
+	for _, candidate := range TicketStatuses {
+		if candidate == status {
+			return true
+		}
+	}
+	return false
+}
+
+func isValidTicketType(ticketType TicketType) bool {
+	for _, candidate := range TicketTypes {
+		if candidate == ticketType {
+			return true
+		}
+	}
+	return false
 }
 
 func nextPosition(ctx context.Context, tx *sql.Tx, sprintID *int64, status TicketStatus) (int, error) {

@@ -81,6 +81,12 @@ func (m Model) handleBoardNormalKey(msg tea.KeyMsg) Model {
 		if selected := m.selectedBoardTicket(); selected != nil {
 			return m.openDetail(selected.TicketID)
 		}
+	case msg.String() == "n":
+		var sprintID *int64
+		if m.board.data.Metrics.Sprint != nil {
+			sprintID = &m.board.data.Metrics.Sprint.ID
+		}
+		return m.openCreateTicket(routeBoard, sprintID)
 	}
 	return m
 }

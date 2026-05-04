@@ -21,6 +21,7 @@ const (
 	routeSprints
 	routeTickets
 	routeExport
+	routeCreateTicket
 	routeTicketDetail
 )
 
@@ -37,9 +38,11 @@ type service interface {
 	LoadBoard(ctx context.Context) (kanban.BoardData, error)
 	ListTickets(ctx context.Context, filters kanban.TicketListFilters) (kanban.TicketListResult, error)
 	GetTicketDetail(ctx context.Context, ticketID string) (kanban.TicketDetail, error)
+	CreateTicket(ctx context.Context, input kanban.CreateTicketInput) (kanban.TicketDetail, error)
 	UpdateTicket(ctx context.Context, ticketID string, input kanban.UpdateTicketInput) (kanban.TicketDetail, error)
 	MoveTicket(ctx context.Context, ticketID string, delta int) (kanban.TicketDetail, error)
 	AddComment(ctx context.Context, ticketID string, input kanban.AddCommentInput) (kanban.TicketComment, error)
+	EnsureDefaultEpic(ctx context.Context) (kanban.Epic, error)
 	ListEpics(ctx context.Context) ([]kanban.Epic, error)
 	ListSprints(ctx context.Context, filters kanban.SprintListFilters) ([]kanban.SprintSummary, error)
 	ExportTicketMarkdown(ctx context.Context, ticketID string, outPath string) (string, error)
@@ -87,6 +90,40 @@ type exportModel struct {
 	format string
 }
 
+type createTicketModel struct {
+	callerRoute          route
+	callerSelectedTicket string
+	focusedField         int
+	editingField         bool
+	editingValue         string
+	title                string
+	ticketType           kanban.TicketType
+	storyPoints          string
+	description          string
+	epicID               int64
+	epicName             string
+	sprintID             *int64
+	sprintName           string
+	defaultSprintID      *int64
+	errors               map[int]string
+	picker               createPickerModel
+}
+
+type createPickerKind int
+
+const (
+	createPickerNone createPickerKind = iota
+	createPickerEpic
+	createPickerSprint
+)
+
+type createPickerModel struct {
+	kind         createPickerKind
+	query        string
+	focused      int
+	editingQuery bool
+}
+
 // Model is the root Bubble Tea application state.
 type Model struct {
 	config         config.Config
@@ -101,6 +138,7 @@ type Model struct {
 	tickets        ticketsModel
 	detail         detailModel
 	export         exportModel
+	create         createTicketModel
 	selectedTicket *kanban.TicketDetail
 	statusMessage  string
 	errorMessage   string
@@ -179,6 +217,8 @@ func (m Model) handleKey(msg tea.KeyMsg) Model {
 		return m.handleBoardNormalKey(msg)
 	case routeTickets:
 		return m.handleTicketsNormalKey(msg)
+	case routeCreateTicket:
+		return m.handleCreateTicketNormalKey(msg)
 	case routeTicketDetail:
 		return m.handleDetailNormalKey(msg)
 	case routeExport:
@@ -198,10 +238,16 @@ func (m Model) handleInsertKey(msg tea.KeyMsg) Model {
 			m.restoreBoardSelection(m.currentSelectedTicketID())
 			return m
 		}
+		if m.activeRoute == routeCreateTicket {
+			return m.cancelCreateInsert()
+		}
 		m.cancelEdit()
 		return m
 	case "enter":
 		m.mode = modeNormal
+		if m.activeRoute == routeCreateTicket {
+			return m.commitCreateInsert()
+		}
 		return m.commitEdit()
 	case "backspace":
 		m.updateActiveBuffer(trimLastRune(m.activeBuffer()))
@@ -225,6 +271,10 @@ func (m Model) activeBuffer() string {
 		return m.tickets.editingValue
 	case m.activeRoute == routeTicketDetail && m.detail.editingField:
 		return m.detail.editingValue
+	case m.activeRoute == routeCreateTicket && m.create.editingField:
+		return m.create.editingValue
+	case m.activeRoute == routeCreateTicket && m.create.picker.editingQuery:
+		return m.create.picker.query
 	default:
 		return ""
 	}
@@ -240,6 +290,10 @@ func (m *Model) updateActiveBuffer(value string) {
 		m.tickets.editingValue = value
 	case m.activeRoute == routeTicketDetail && m.detail.editingField:
 		m.detail.editingValue = value
+	case m.activeRoute == routeCreateTicket && m.create.editingField:
+		m.create.editingValue = value
+	case m.activeRoute == routeCreateTicket && m.create.picker.editingQuery:
+		m.create.picker.query = value
 	}
 }
 
@@ -264,6 +318,8 @@ func (m Model) commitEdit() Model {
 		return m.commitTableEdit()
 	case m.activeRoute == routeTicketDetail && m.detail.editingField:
 		return m.commitDetailEdit()
+	case m.activeRoute == routeCreateTicket:
+		return m.commitCreateInsert()
 	default:
 		return m
 	}
@@ -318,6 +374,13 @@ func (m *Model) refreshTickets() {
 	m.tickets.data = result
 	if m.tickets.focusedRow >= len(result.Tickets) {
 		m.tickets.focusedRow = max(0, len(result.Tickets)-1)
+	}
+}
+
+func (m *Model) refreshTicketsByInternalID(ticketID int64) {
+	m.refreshTickets()
+	if ticketID > 0 {
+		m.focusTableTicketByInternalID(ticketID)
 	}
 }
 
@@ -396,6 +459,37 @@ func (m *Model) restoreBoardSelection(preferTicketID string) {
 		m.board.focusedRows[m.board.focusedColumn] = 0
 	}
 	m.loadSelectedTicket(column.Tickets[m.board.focusedRows[m.board.focusedColumn]].TicketID)
+}
+
+func (m *Model) focusBoardTicketByInternalID(ticketID int64) bool {
+	if ticketID == 0 {
+		return false
+	}
+	for colIdx, column := range m.board.filtered {
+		for rowIdx, ticket := range column.Tickets {
+			if ticket.ID == ticketID {
+				m.board.focusedColumn = colIdx
+				m.board.focusedRows[colIdx] = rowIdx
+				m.loadSelectedTicket(ticket.TicketID)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (m *Model) focusTableTicketByInternalID(ticketID int64) bool {
+	if ticketID == 0 {
+		return false
+	}
+	for idx, ticket := range m.tickets.data.Tickets {
+		if ticket.ID == ticketID {
+			m.tickets.focusedRow = idx
+			m.loadSelectedTicket(ticket.TicketID)
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) currentSelectedTicketID() string {
@@ -479,6 +573,8 @@ func routeTitle(r route) string {
 		return "Tickets"
 	case routeExport:
 		return "Export"
+	case routeCreateTicket:
+		return "Create Ticket"
 	case routeTicketDetail:
 		return "Ticket Detail"
 	default:
@@ -525,13 +621,15 @@ func renderFooter(width int, active route, mode inputMode, status, errText strin
 	help := "1-4 routes  q quit"
 	switch active {
 	case routeBoard:
-		help = "h/l columns  j/k tickets  H/L move ticket  s search  f blocked filter  Enter detail"
+		help = "h/l columns  j/k tickets  H/L move ticket  n create  s search  f blocked filter  Enter detail"
 	case routeTickets:
-		help = "j/k rows  h/l columns  i edit  Enter detail"
+		help = "j/k rows  h/l columns  i edit  n create  Enter detail"
 	case routeTicketDetail:
 		help = "j/k fields  i edit  Enter save  Esc back/cancel"
 	case routeExport:
 		help = "h/l format  Enter export"
+	case routeCreateTicket:
+		help = "j/k fields  i edit  h/l type  Enter select/save  Esc cancel"
 	}
 	if errText != "" {
 		help = "error: " + errText
@@ -566,6 +664,8 @@ func (m Model) renderBody(height int) string {
 		return renderPlaceholderPanel(m.width, height, "Sprints", "MVP placeholder. Active sprint data is surfaced on the board.")
 	case routeExport:
 		return m.exportView(m.width, height)
+	case routeCreateTicket:
+		return m.createTicketView(m.width, height)
 	case routeTicketDetail:
 		return m.detailView(m.width, height)
 	default:
