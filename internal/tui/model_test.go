@@ -50,7 +50,7 @@ func newTestModel(t *testing.T) Model {
 	if err != nil {
 		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	create := func(title string, status kanban.TicketStatus, blocked bool, points int) kanban.TicketDetail {
+	create := func(title string, status kanban.TicketStatus, blocked bool, points float64) kanban.TicketDetail {
 		ticket, err := service.CreateTicket(context.Background(), kanban.CreateTicketInput{
 			Title:       title,
 			Status:      status,
@@ -73,6 +73,40 @@ func newTestModel(t *testing.T) Model {
 	_ = create("Ship Sprint Demo", kanban.TicketStatusDone, false, 5)
 	if _, err := service.AddComment(context.Background(), first.TicketID, kanban.AddCommentInput{Kind: kanban.CommentKindText, Body: "comment one"}); err != nil {
 		t.Fatalf("AddComment returned error: %v", err)
+	}
+
+	return NewModel(Dependencies{
+		Config:  cfg,
+		Paths:   platform.Paths{},
+		Service: service,
+	})
+}
+
+func newEmptyEpicModel(t *testing.T) Model {
+	t.Helper()
+
+	cfg := config.Defaults(t.TempDir())
+	cfg.App.Timezone = "America/New_York"
+	db, err := storage.Open(context.Background(), t.TempDir()+"/kanban.db")
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := storage.ApplyMigrations(context.Background(), db); err != nil {
+		t.Fatalf("ApplyMigrations returned error: %v", err)
+	}
+
+	service := kanban.NewService(db, cfg)
+	service.SetNowFunc(func() time.Time {
+		return time.Date(2026, 4, 24, 10, 0, 0, 0, time.FixedZone("EDT", -4*60*60))
+	})
+	if _, err := service.CreateSprint(context.Background(), kanban.CreateSprintInput{
+		Name:      "26Q2 Sprint 3",
+		Quarter:   "2026Q2",
+		StartDate: time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local),
+		EndDate:   time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local),
+	}); err != nil {
+		t.Fatalf("CreateSprint returned error: %v", err)
 	}
 
 	return NewModel(Dependencies{
@@ -263,6 +297,253 @@ func TestRenderSprintPanelShowsStoredPercentValue(t *testing.T) {
 	}
 	if strings.Contains(view, "5000.00%") {
 		t.Fatalf("expected no double-scaled percent, got %q", view)
+	}
+}
+
+func TestBoardAndTicketsOpenCreateFlow(t *testing.T) {
+	t.Parallel()
+
+	t.Run("board", func(t *testing.T) {
+		model := newTestModel(t)
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+		if model.activeRoute != routeCreateTicket {
+			t.Fatalf("expected create ticket route, got %v", model.activeRoute)
+		}
+	})
+
+	t.Run("tickets", func(t *testing.T) {
+		model := newTestModel(t)
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+		if model.activeRoute != routeCreateTicket {
+			t.Fatalf("expected create ticket route, got %v", model.activeRoute)
+		}
+	})
+}
+
+func TestOpenCreateFlowSeedsInboxEpic(t *testing.T) {
+	t.Parallel()
+
+	model := newEmptyEpicModel(t)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected create route, got %v", model.activeRoute)
+	}
+	if model.create.epicName != kanban.DefaultEpicName {
+		t.Fatalf("expected default epic %q, got %q", kanban.DefaultEpicName, model.create.epicName)
+	}
+}
+
+func TestCreateTicketFromTicketsSelectsNewTicket(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
+	model = model.openCreateTicket(routeTickets, nil)
+	model.create.title = "Created from tickets"
+	model.create.storyPoints = "5"
+	model.create.description = "new ticket"
+	model = model.submitCreateTicket()
+
+	if model.activeRoute != routeTickets {
+		t.Fatalf("expected to return to tickets, got %v", model.activeRoute)
+	}
+	if model.selectedTicket == nil || model.selectedTicket.Title != "Created from tickets" {
+		t.Fatalf("expected selected created ticket, got %+v", model.selectedTicket)
+	}
+	if model.tickets.data.Tickets[model.tickets.focusedRow].Title != "Created from tickets" {
+		t.Fatalf("expected focused row to be created ticket, got %q", model.tickets.data.Tickets[model.tickets.focusedRow].Title)
+	}
+}
+
+func TestCreateTicketValidationPreservesInput(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model.create.title = "   "
+	model.create.storyPoints = "3"
+	model.create.description = "keep me"
+	model = model.submitCreateTicket()
+
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected to stay on create route, got %v", model.activeRoute)
+	}
+	if model.create.errors[createFieldTitle] == "" {
+		t.Fatal("expected title validation error")
+	}
+	if model.create.description != "keep me" {
+		t.Fatalf("expected description preserved, got %q", model.create.description)
+	}
+}
+
+func TestCreateTicketTextFieldTypingAndSpaces(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	if model.mode != modeInsert {
+		t.Fatalf("expected insert mode after typing into title, got %v", model.mode)
+	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeySpace})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.create.title != "Hi T" {
+		t.Fatalf("expected title with spaces preserved, got %q", model.create.title)
+	}
+}
+
+func TestCreateTicketTextFieldStartsWithSpaceKey(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeySpace})
+	if model.mode != modeInsert {
+		t.Fatalf("expected insert mode after leading space, got %v", model.mode)
+	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.create.title != " A" {
+		t.Fatalf("expected title to preserve leading space, got %q", model.create.title)
+	}
+}
+
+func TestCreateTicketAllowsDecimalStoryPoints(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model.create.title = "Decimal points"
+	model.create.storyPoints = "0.5"
+	model = model.submitCreateTicket()
+	if model.selectedTicket == nil {
+		t.Fatal("expected created ticket selected")
+	}
+	if model.selectedTicket.StoryPoints != 0.5 {
+		t.Fatalf("expected decimal story points, got %v", model.selectedTicket.StoryPoints)
+	}
+}
+
+func TestCreateTicketRejectsNonFiniteStoryPoints(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	initialTicketCount := len(model.tickets.data.Tickets)
+	model.create.title = "Invalid points"
+	model.create.storyPoints = "NaN"
+	model = model.submitCreateTicket()
+
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected to stay on create route, got %v", model.activeRoute)
+	}
+	if model.create.errors[createFieldStoryPoints] == "" {
+		t.Fatal("expected story points validation error")
+	}
+	if len(model.tickets.data.Tickets) != initialTicketCount {
+		t.Fatalf("expected no ticket to be created, got %d tickets", len(model.tickets.data.Tickets))
+	}
+}
+
+func TestCreateTicketBlocksNumericRouteSwitching(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected create route to stay active, got %v", model.activeRoute)
+	}
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyTab})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyTab})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected create route to stay active while editing story points, got %v", model.activeRoute)
+	}
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected create route to stay active in insert mode, got %v", model.activeRoute)
+	}
+}
+
+func TestCreateTicketViewShowsInlineHelpAndSprintHint(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.WindowSizeMsg{Width: 120, Height: 30})
+	view := model.View()
+	if !strings.Contains(view, "1-4 routes disabled while creating") {
+		t.Fatalf("expected modal help in create view, got %q", view)
+	}
+	if !strings.Contains(view, "Press Enter on Sprint to choose an existing sprint") {
+		t.Fatalf("expected sprint hint in create view, got %q", view)
+	}
+}
+
+func TestCreateTicketPickerClampsFocusAfterFiltering(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 2, Name: "Beta"},
+		{ID: 3, Name: "Berry"},
+		{ID: 4, Name: "Gamma"},
+	}
+	model = model.openCreateTicket(routeTickets, nil)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 2, Name: "Beta"},
+		{ID: 3, Name: "Berry"},
+		{ID: 4, Name: "Gamma"},
+	}
+	model.create.focusedField = createFieldEpic
+	model.openCreatePicker(createPickerEpic)
+	model.create.picker.focused = 2
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if model.create.picker.kind != createPickerNone {
+		t.Fatalf("expected picker to close after selecting filtered item, got %v", model.create.picker.kind)
+	}
+	if model.create.epicName != "Beta" {
+		t.Fatalf("expected filtered epic selection to clamp to Beta, got %q", model.create.epicName)
+	}
+}
+
+func TestCreateTicketPickerEnterNoopsWhenFilterRemovesAllItems(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 1, Name: "Alpha"},
+		{ID: 2, Name: "Beta"},
+	}
+	model = model.openCreateTicket(routeTickets, nil)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 1, Name: "Alpha"},
+		{ID: 2, Name: "Beta"},
+	}
+	model.create.focusedField = createFieldEpic
+	model.openCreatePicker(createPickerEpic)
+	model.create.picker.focused = 1
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if model.create.picker.focused != 0 {
+		t.Fatalf("expected picker focus reset to 0, got %d", model.create.picker.focused)
+	}
+	if model.create.picker.kind != createPickerEpic {
+		t.Fatalf("expected picker to remain open when no items match, got %v", model.create.picker.kind)
 	}
 }
 
@@ -505,6 +786,10 @@ func (s *countingService) GetTicketDetail(_ context.Context, ticketID string) (k
 	return s.details[ticketID], nil
 }
 
+func (s *countingService) CreateTicket(context.Context, kanban.CreateTicketInput) (kanban.TicketDetail, error) {
+	return kanban.TicketDetail{}, nil
+}
+
 func (s *countingService) UpdateTicket(context.Context, string, kanban.UpdateTicketInput) (kanban.TicketDetail, error) {
 	return kanban.TicketDetail{}, nil
 }
@@ -515,6 +800,10 @@ func (s *countingService) MoveTicket(context.Context, string, int) (kanban.Ticke
 
 func (s *countingService) AddComment(context.Context, string, kanban.AddCommentInput) (kanban.TicketComment, error) {
 	return kanban.TicketComment{}, nil
+}
+
+func (s *countingService) EnsureCreateEpic(context.Context) (kanban.Epic, error) {
+	return kanban.Epic{ID: 1, Name: "Epic One"}, nil
 }
 
 func (s *countingService) ListEpics(context.Context) ([]kanban.Epic, error) {

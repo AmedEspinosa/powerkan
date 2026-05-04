@@ -86,7 +86,7 @@ type Ticket struct {
 	Status      TicketStatus
 	Type        TicketType
 	Blocked     bool
-	StoryPoints int
+	StoryPoints float64
 	EpicID      int64
 	EpicName    string
 	SprintID    *int64
@@ -121,8 +121,8 @@ type BoardMetrics struct {
 	DaysLeft         int
 	PercentCompleted float64
 	PointsPerDay     float64
-	TotalPoints      int
-	DonePoints       int
+	TotalPoints      float64
+	DonePoints       float64
 }
 
 type BoardData struct {
@@ -139,7 +139,7 @@ type TicketListFilters struct {
 
 type TicketListResult struct {
 	Tickets      []Ticket
-	TotalPoints  int
+	TotalPoints  float64
 	Epics        []Epic
 	Sprints      []Sprint
 	ActiveFilter TicketListFilters
@@ -153,8 +153,8 @@ type SprintListFilters struct {
 type SprintSummary struct {
 	Sprint
 	PercentCompleted float64
-	PointsCompleted  int
-	TotalPoints      int
+	PointsCompleted  float64
+	TotalPoints      float64
 	TicketCount      int
 }
 
@@ -181,7 +181,7 @@ type CreateTicketInput struct {
 	Status      TicketStatus
 	Type        TicketType
 	Blocked     bool
-	StoryPoints int
+	StoryPoints float64
 	EpicID      int64
 	SprintID    *int64
 	GitHubPRURL string
@@ -193,7 +193,7 @@ type UpdateTicketInput struct {
 	Status      TicketStatus
 	Type        TicketType
 	Blocked     bool
-	StoryPoints int
+	StoryPoints float64
 	EpicID      int64
 	SprintID    *int64
 	GitHubPRURL string
@@ -212,8 +212,8 @@ type ExportTicketData struct {
 type SprintWebhookPayload struct {
 	StartDate        string  `json:"start_date"`
 	EndDate          string  `json:"end_date"`
-	TotalPoints      int     `json:"total_points"`
-	PointsCompleted  int     `json:"points_completed"`
+	TotalPoints      float64 `json:"total_points"`
+	PointsCompleted  float64 `json:"points_completed"`
 	PercentCompleted float64 `json:"percent_completed"`
 }
 

@@ -172,6 +172,7 @@ CREATE TABLE webhook_posts (
 	defer rows.Close()
 
 	found := false
+	foundStoryPointsReal := false
 	for rows.Next() {
 		var cid int
 		var name, dataType string
@@ -182,7 +183,9 @@ CREATE TABLE webhook_posts (
 		}
 		if name == "position" {
 			found = true
-			break
+		}
+		if name == "story_points" && dataType == "REAL" {
+			foundStoryPointsReal = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -190,6 +193,9 @@ CREATE TABLE webhook_posts (
 	}
 	if !found {
 		t.Fatal("expected tickets.position column after migration")
+	}
+	if !foundStoryPointsReal {
+		t.Fatal("expected tickets.story_points column to be REAL after migration")
 	}
 }
 
@@ -250,11 +256,42 @@ INSERT INTO tickets(id, ticket_id, title, status, type, blocked, story_points, e
 	})
 
 	var count int
-	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM schema_version WHERE version = 3`).Scan(&count); err != nil {
-		t.Fatalf("schema_version lookup for v3 failed: %v", err)
+	if err := db.QueryRowContext(context.Background(), `SELECT COUNT(1) FROM schema_version WHERE version = 4`).Scan(&count); err != nil {
+		t.Fatalf("schema_version lookup for v4 failed: %v", err)
 	}
 	if count != 1 {
-		t.Fatalf("expected schema version 3 to be recorded once, got %d", count)
+		t.Fatalf("expected schema version 4 to be recorded once, got %d", count)
+	}
+}
+
+func TestApplyMigrationsConvertsLegacyStoryPointsToReal(t *testing.T) {
+	t.Parallel()
+
+	db := openLegacyV2DB(t)
+	defer func() { _ = db.Close() }()
+
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO epics(id, name, created_at) VALUES (1, 'Epic', '2026-04-20T10:00:00Z');
+INSERT INTO tickets(id, ticket_id, title, status, type, blocked, story_points, epic_id, sprint_id, github_pr_url, description, created_at, updated_at, position) VALUES
+	(1, 'TICKET-001', 'First', 'NOT_STARTED', 'FEATURE', 0, 1, 1, NULL, '', '', '2026-04-20T10:00:00Z', '2026-04-20T10:02:00Z', 0);`); err != nil {
+		t.Fatalf("seed version two data returned error: %v", err)
+	}
+
+	if err := ApplyMigrations(context.Background(), db); err != nil {
+		t.Fatalf("ApplyMigrations returned error: %v", err)
+	}
+
+	if _, err := db.ExecContext(context.Background(), `
+UPDATE tickets SET story_points = 0.5 WHERE ticket_id = 'TICKET-001'`); err != nil {
+		t.Fatalf("update decimal story points returned error: %v", err)
+	}
+
+	var got float64
+	if err := db.QueryRowContext(context.Background(), `SELECT story_points FROM tickets WHERE ticket_id = 'TICKET-001'`).Scan(&got); err != nil {
+		t.Fatalf("select decimal story points returned error: %v", err)
+	}
+	if got != 0.5 {
+		t.Fatalf("expected decimal story points after migration, got %v", got)
 	}
 }
 

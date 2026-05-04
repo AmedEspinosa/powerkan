@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -27,6 +28,8 @@ var (
 	ErrSprintInUse          = errors.New("sprint is referenced by existing tickets")
 	ErrWebhookNotConfigured = errors.New("webhook endpoint_url is not configured")
 )
+
+const DefaultEpicName = "Inbox"
 
 type Service struct {
 	db     *sql.DB
@@ -71,8 +74,8 @@ func (s *Service) LoadBoard(ctx context.Context) (BoardData, error) {
 		return BoardData{}, err
 	}
 
-	totalPoints := 0
-	donePoints := 0
+	totalPoints := 0.0
+	donePoints := 0.0
 	for _, ticket := range tickets {
 		totalPoints += ticket.StoryPoints
 		if ticket.Status == TicketStatusDone {
@@ -142,7 +145,7 @@ func (s *Service) ListTickets(ctx context.Context, filters TicketListFilters) (T
 	defer rows.Close()
 
 	var tickets []Ticket
-	totalPoints := 0
+	totalPoints := 0.0
 	for rows.Next() {
 		ticket, err := scanTicket(rows)
 		if err != nil {
@@ -240,6 +243,22 @@ func (s *Service) ListEpics(ctx context.Context) ([]Epic, error) {
 		epics = append(epics, epic)
 	}
 	return epics, rows.Err()
+}
+
+func (s *Service) EnsureCreateEpic(ctx context.Context) (Epic, error) {
+	epics, err := s.ListEpics(ctx)
+	if err != nil {
+		return Epic{}, err
+	}
+	if len(epics) == 0 {
+		return s.CreateEpic(ctx, CreateEpicInput{Name: DefaultEpicName})
+	}
+	for _, epic := range epics {
+		if strings.EqualFold(epic.Name, DefaultEpicName) {
+			return epic, nil
+		}
+	}
+	return epics[0], nil
 }
 
 func (s *Service) DeleteEpic(ctx context.Context, id int64) error {
@@ -375,7 +394,8 @@ func (s *Service) ListSprints(ctx context.Context, filters SprintListFilters) ([
 			continue
 		}
 
-		var totalPoints, pointsCompleted, ticketCount int
+		var totalPoints, pointsCompleted float64
+		var ticketCount int
 		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(story_points), 0), COALESCE(SUM(CASE WHEN status = 'DONE' THEN story_points ELSE 0 END), 0), COUNT(1)
 			FROM tickets WHERE sprint_id = ?`, sprint.ID).Scan(&totalPoints, &pointsCompleted, &ticketCount); err != nil {
 			return nil, err
@@ -436,7 +456,7 @@ func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (Ti
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	epicName, err := lookupEpicName(ctx, tx, input.EpicID)
+	epicName, err := validateCreateTicketInput(ctx, tx, input)
 	if err != nil {
 		return TicketDetail{}, err
 	}
@@ -680,7 +700,7 @@ func (s *Service) ExportTicketMarkdown(ctx context.Context, ticketID string, out
 	} else {
 		b.WriteString("- Sprint: `BACKLOG`\n")
 	}
-	b.WriteString(fmt.Sprintf("- Story Points: `%d`\n", data.StoryPoints))
+	b.WriteString(fmt.Sprintf("- Story Points: `%s`\n", FormatStoryPoints(data.StoryPoints)))
 	b.WriteString(fmt.Sprintf("- Blocked: `%t`\n", data.Blocked))
 	if data.GitHubPRURL != "" {
 		b.WriteString(fmt.Sprintf("- GitHub PR: %s\n", data.GitHubPRURL))
@@ -748,7 +768,7 @@ func (s *Service) ExportTicketCSV(ctx context.Context, ticketID string, outPath 
 		string(data.Type),
 		data.EpicName,
 		sprintName,
-		fmt.Sprintf("%d", data.StoryPoints),
+		FormatStoryPoints(data.StoryPoints),
 		fmt.Sprintf("%t", data.Blocked),
 		data.GitHubPRURL,
 		data.Description,
@@ -1085,6 +1105,60 @@ func lookupEpicName(ctx context.Context, tx *sql.Tx, epicID int64) (string, erro
 	return name, nil
 }
 
+func validateCreateTicketInput(ctx context.Context, tx *sql.Tx, input CreateTicketInput) (string, error) {
+	if strings.TrimSpace(input.Title) == "" {
+		return "", fmt.Errorf("title is required")
+	}
+	if !isValidTicketStatus(input.Status) {
+		return "", fmt.Errorf("invalid ticket status %q", input.Status)
+	}
+	if !isValidTicketType(input.Type) {
+		return "", fmt.Errorf("invalid ticket type %q", input.Type)
+	}
+	if !isFiniteStoryPoints(input.StoryPoints) || input.StoryPoints < 0 {
+		return "", fmt.Errorf("story points must be greater than or equal to 0")
+	}
+	epicName, err := lookupEpicName(ctx, tx, input.EpicID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return "", fmt.Errorf("unknown epic id %d", input.EpicID)
+		}
+		return "", err
+	}
+	if input.SprintID != nil {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE id = ?`, *input.SprintID).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return "", fmt.Errorf("unknown sprint id %d", *input.SprintID)
+		}
+	}
+	return epicName, nil
+}
+
+func isFiniteStoryPoints(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func isValidTicketStatus(status TicketStatus) bool {
+	for _, candidate := range TicketStatuses {
+		if candidate == status {
+			return true
+		}
+	}
+	return false
+}
+
+func isValidTicketType(ticketType TicketType) bool {
+	for _, candidate := range TicketTypes {
+		if candidate == ticketType {
+			return true
+		}
+	}
+	return false
+}
+
 func nextPosition(ctx context.Context, tx *sql.Tx, sprintID *int64, status TicketStatus) (int, error) {
 	query := `SELECT COALESCE(MAX(position), -1) + 1 FROM tickets WHERE status = ? AND `
 	args := []any{string(status)}
@@ -1127,18 +1201,18 @@ func inclusiveDays(start, end time.Time) int {
 	return int(end.Sub(start).Hours()/24) + 1
 }
 
-func ratio(a, b int) float64 {
+func ratio(a, b float64) float64 {
 	if b == 0 {
 		return 0
 	}
-	return float64(a) / float64(b) * 100
+	return a / b * 100
 }
 
-func divide(a, b int) float64 {
+func divide(a float64, b int) float64 {
 	if b == 0 {
 		return 0
 	}
-	return float64(a) / float64(b)
+	return a / float64(b)
 }
 
 func initials(name string) string {
