@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS tickets (
 	status TEXT NOT NULL CHECK (status IN ('NOT_STARTED', 'IN_PROGRESS', 'UNDER_REVIEW', 'DONE')),
 	type TEXT NOT NULL CHECK (type IN ('FEATURE', 'BUG', 'FIX', 'DOCS')),
 	blocked INTEGER NOT NULL DEFAULT 0,
-	story_points INTEGER NOT NULL DEFAULT 0,
+	story_points REAL NOT NULL DEFAULT 0,
 	epic_id INTEGER NOT NULL,
 	sprint_id INTEGER,
 	github_pr_url TEXT,
@@ -79,6 +79,10 @@ ALTER TABLE tickets ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
 	{
 		version: 3,
 		run:     backfillTicketPositions,
+	},
+	{
+		version: 4,
+		run:     migrateTicketStoryPointsToReal,
 	},
 }
 
@@ -184,4 +188,54 @@ ORDER BY status, COALESCE(sprint_id, -1), COALESCE(position, 0), updated_at DESC
 	}
 
 	return rows.Err()
+}
+
+func migrateTicketStoryPointsToReal(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+CREATE TABLE tickets_new (
+	id INTEGER PRIMARY KEY,
+	ticket_id TEXT NOT NULL UNIQUE,
+	title TEXT NOT NULL,
+	status TEXT NOT NULL CHECK (status IN ('NOT_STARTED', 'IN_PROGRESS', 'UNDER_REVIEW', 'DONE')),
+	type TEXT NOT NULL CHECK (type IN ('FEATURE', 'BUG', 'FIX', 'DOCS')),
+	blocked INTEGER NOT NULL DEFAULT 0,
+	story_points REAL NOT NULL DEFAULT 0,
+	epic_id INTEGER NOT NULL,
+	sprint_id INTEGER,
+	github_pr_url TEXT,
+	description TEXT,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	position INTEGER NOT NULL DEFAULT 0,
+	FOREIGN KEY (epic_id) REFERENCES epics(id),
+	FOREIGN KEY (sprint_id) REFERENCES sprints(id)
+);`); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO tickets_new (
+	id, ticket_id, title, status, type, blocked, story_points, epic_id, sprint_id,
+	github_pr_url, description, created_at, updated_at, position
+)
+SELECT
+	id, ticket_id, title, status, type, blocked, story_points, epic_id, sprint_id,
+	github_pr_url, description, created_at, updated_at, position
+FROM tickets;`); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `DROP TABLE tickets`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE tickets_new RENAME TO tickets`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `PRAGMA foreign_keys = ON`); err != nil {
+		return err
+	}
+	return nil
 }

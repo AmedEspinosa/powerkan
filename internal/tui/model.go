@@ -104,6 +104,7 @@ type createTicketModel struct {
 	epicName             string
 	sprintID             *int64
 	sprintName           string
+	sprintHint           string
 	defaultSprintID      *int64
 	errors               map[int]string
 	picker               createPickerModel
@@ -168,7 +169,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case tea.KeyMsg:
-		if m.mode == modeNormal && (msg.String() == "ctrl+c" || msg.String() == "q") {
+		if m.activeRoute != routeCreateTicket && m.mode == modeNormal && (msg.String() == "ctrl+c" || msg.String() == "q") {
 			return m, tea.Quit
 		}
 		return m.handleKey(msg), nil
@@ -191,6 +192,10 @@ func (m Model) View() string {
 func (m Model) handleKey(msg tea.KeyMsg) Model {
 	if m.mode == modeInsert {
 		return m.handleInsertKey(msg)
+	}
+
+	if m.activeRoute == routeCreateTicket {
+		return m.handleCreateTicketNormalKey(msg)
 	}
 
 	switch msg.String() {
@@ -217,8 +222,6 @@ func (m Model) handleKey(msg tea.KeyMsg) Model {
 		return m.handleBoardNormalKey(msg)
 	case routeTickets:
 		return m.handleTicketsNormalKey(msg)
-	case routeCreateTicket:
-		return m.handleCreateTicketNormalKey(msg)
 	case routeTicketDetail:
 		return m.handleDetailNormalKey(msg)
 	case routeExport:
@@ -253,6 +256,11 @@ func (m Model) handleInsertKey(msg tea.KeyMsg) Model {
 		m.updateActiveBuffer(trimLastRune(m.activeBuffer()))
 		return m
 	case "space":
+		m.updateActiveBuffer(m.activeBuffer() + " ")
+		return m
+	}
+
+	if msg.Type == tea.KeySpace {
 		m.updateActiveBuffer(m.activeBuffer() + " ")
 		return m
 	}
@@ -629,7 +637,7 @@ func renderFooter(width int, active route, mode inputMode, status, errText strin
 	case routeExport:
 		help = "h/l format  Enter export"
 	case routeCreateTicket:
-		help = "j/k fields  i edit  h/l type  Enter select/save  Esc cancel"
+		help = "Tab/j/k move  type to edit  h/l type  Enter select/save  Esc cancel"
 	}
 	if errText != "" {
 		help = "error: " + errText
@@ -688,6 +696,13 @@ func max(a, b int) int {
 	return b
 }
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func parseBool(value string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes", "y", "blocked":
@@ -699,8 +714,8 @@ func parseBool(value string) (bool, error) {
 	}
 }
 
-func parseStoryPoints(value string) (int, error) {
-	n, err := strconv.Atoi(strings.TrimSpace(value))
+func parseStoryPoints(value string) (float64, error) {
+	n, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid story points %q", value)
 	}

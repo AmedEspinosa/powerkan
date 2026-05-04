@@ -38,20 +38,22 @@ func (m Model) handleCreateTicketNormalKey(msg tea.KeyMsg) Model {
 		return m.handleCreatePickerKey(msg)
 	}
 
+	if m.isCreateTextField() && isSpaceKey(msg) {
+		return m.beginCreateFieldEdit(" ")
+	}
+
+	if m.isCreateTextField() && msg.Type == tea.KeyRunes && isPrintableRunes(msg.Runes) {
+		return m.beginCreateFieldEdit(string(msg.Runes))
+	}
+
 	switch {
-	case msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
-		if m.create.focusedField < len(createFieldLabels)-1 {
-			m.create.focusedField++
-		}
-	case msg.String() == "k" || msg.String() == "up" || msg.Type == tea.KeyUp:
-		if m.create.focusedField > 0 {
-			m.create.focusedField--
-		}
+	case msg.String() == "tab" || msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
+		m.create.focusedField = min(m.create.focusedField+1, len(createFieldLabels)-1)
+	case msg.String() == "shift+tab" || msg.String() == "k" || msg.String() == "up" || msg.Type == tea.KeyUp:
+		m.create.focusedField = max(0, m.create.focusedField-1)
 	case msg.String() == "i" || msg.String() == "e":
 		if m.isCreateTextField() {
-			m.mode = modeInsert
-			m.create.editingField = true
-			m.create.editingValue = m.currentCreateFieldValue()
+			return m.beginCreateFieldEdit("")
 		}
 	case msg.String() == "h" || msg.String() == "left" || msg.Type == tea.KeyLeft:
 		if m.create.focusedField == createFieldType {
@@ -63,6 +65,8 @@ func (m Model) handleCreateTicketNormalKey(msg tea.KeyMsg) Model {
 		}
 	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
 		switch m.create.focusedField {
+		case createFieldTitle, createFieldStoryPoints, createFieldDescription:
+			return m.beginCreateFieldEdit("")
 		case createFieldEpic:
 			m.openCreatePicker(createPickerEpic)
 		case createFieldSprint:
@@ -74,7 +78,22 @@ func (m Model) handleCreateTicketNormalKey(msg tea.KeyMsg) Model {
 		}
 	case msg.String() == "esc" || msg.Type == tea.KeyEsc:
 		return m.exitCreateTicket()
+	default:
+		if m.isCreateTextField() && msg.Type == tea.KeyRunes && len(msg.Runes) > 0 {
+			return m.beginCreateFieldEdit(string(msg.Runes))
+		}
 	}
+	return m
+}
+
+func (m Model) beginCreateFieldEdit(seed string) Model {
+	m.mode = modeInsert
+	m.create.editingField = true
+	if seed == "" {
+		m.create.editingValue = m.currentCreateFieldValue()
+		return m
+	}
+	m.create.editingValue = seed
 	return m
 }
 
@@ -98,9 +117,16 @@ func (m Model) openCreateTicket(caller route, defaultSprintID *int64) Model {
 		epicName:             defaultEpic.Name,
 	}
 
-	if sprintName, ok := m.lookupSprintName(defaultSprintID); ok {
-		model.sprintID = cloneInt64Pointer(defaultSprintID)
-		model.sprintName = sprintName
+	switch {
+	case defaultSprintID != nil:
+		if sprintName, ok := m.lookupSprintName(defaultSprintID); ok {
+			model.sprintID = cloneInt64Pointer(defaultSprintID)
+			model.sprintName = sprintName
+		}
+	case len(m.tickets.data.Sprints) == 0:
+		model.sprintHint = "No sprints exist yet. Ticket will be created in Backlog."
+	default:
+		model.sprintHint = "No active sprint found. Press Enter on Sprint to choose an existing sprint."
 	}
 
 	m.create = model
@@ -174,25 +200,23 @@ func (m Model) cancelCreateInsert() Model {
 
 func (m *Model) openCreatePicker(kind createPickerKind) {
 	m.create.picker = createPickerModel{kind: kind}
+	m.mode = modeNormal
 }
 
 func (m Model) handleCreatePickerKey(msg tea.KeyMsg) Model {
 	items := m.filteredCreatePickerItems()
 	switch {
-	case msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
+	case msg.String() == "tab" || msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
 		if m.create.picker.focused < len(items)-1 {
 			m.create.picker.focused++
 		}
-	case msg.String() == "k" || msg.String() == "up" || msg.Type == tea.KeyUp:
+	case msg.String() == "shift+tab" || msg.String() == "k" || msg.String() == "up" || msg.Type == tea.KeyUp:
 		if m.create.picker.focused > 0 {
 			m.create.picker.focused--
 		}
 	case msg.String() == "i" || msg.String() == "e":
 		m.mode = modeInsert
 		m.create.picker.editingQuery = true
-	case msg.String() == "backspace":
-		m.create.picker.query = trimLastRune(m.create.picker.query)
-		m.normalizeCreatePickerFocus(len(m.filteredCreatePickerItems()))
 	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
 		if len(items) == 0 {
 			return m
@@ -205,6 +229,9 @@ func (m Model) handleCreatePickerKey(msg tea.KeyMsg) Model {
 		case createPickerSprint:
 			m.create.sprintID = cloneInt64Pointer(selected.sprintID)
 			m.create.sprintName = selected.label
+			if selected.sprintID == nil {
+				m.create.sprintHint = ""
+			}
 		}
 		m.create.picker = createPickerModel{}
 	case msg.String() == "esc" || msg.Type == tea.KeyEsc:
@@ -235,6 +262,8 @@ func (m Model) createTicketView(width, height int) string {
 	box := lipgloss.NewStyle().Width(width).Height(height).Padding(1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("250"))
 	lines := []string{
 		lipgloss.NewStyle().Bold(true).Render("Create Ticket"),
+		"Tab/Shift+Tab or j/k move, Enter edit/select/save, type to edit text, h/l change type, Esc cancel",
+		"1-4 routes disabled while creating",
 		"",
 	}
 
@@ -247,13 +276,16 @@ func (m Model) createTicketView(width, height int) string {
 			style = style.Foreground(lipgloss.Color("208"))
 		}
 		lines = append(lines, style.Render(prefix+label+": "+value))
+		if idx == createFieldSprint && m.create.sprintHint != "" {
+			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("    "+m.create.sprintHint))
+		}
 		if msg := m.create.errors[idx]; msg != "" {
 			lines = append(lines, lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("    "+msg))
 		}
 	}
 
 	if m.create.picker.kind != createPickerNone {
-		lines = append(lines, "", m.renderCreatePicker(max(40, width-6), max(8, height/3)))
+		lines = append(lines, "", m.renderCreatePicker(max(40, width-6), max(9, height/3)))
 	}
 
 	return box.Render(strings.Join(lines, "\n"))
@@ -282,12 +314,13 @@ func (m Model) createFieldDisplayValue(field int) string {
 		}
 		return m.create.description
 	case createFieldEpic:
-		return m.create.epicName
+		return fmt.Sprintf("%s (Enter to choose)", m.create.epicName)
 	case createFieldSprint:
-		if m.create.sprintID == nil {
-			return "Backlog"
+		name := "Backlog"
+		if m.create.sprintID != nil {
+			name = m.create.sprintName
 		}
-		return m.create.sprintName
+		return fmt.Sprintf("%s (Enter to choose)", name)
 	case createFieldSubmit:
 		return "[Create]"
 	case createFieldCancel:
@@ -309,8 +342,8 @@ func (m Model) filteredCreatePickerItems() []createPickerItem {
 	switch m.create.picker.kind {
 	case createPickerEpic:
 		for _, epic := range m.tickets.data.Epics {
-			label := fmt.Sprintf("%s (#%d)", epic.Name, epic.ID)
-			if query != "" && !strings.Contains(strings.ToLower(label), query) {
+			display := fmt.Sprintf("%s (#%d)", epic.Name, epic.ID)
+			if query != "" && !strings.Contains(strings.ToLower(display), query) {
 				continue
 			}
 			items = append(items, createPickerItem{label: epic.Name, epicID: epic.ID})
@@ -321,8 +354,8 @@ func (m Model) filteredCreatePickerItems() []createPickerItem {
 			items = append(items, backlog)
 		}
 		for _, sprint := range m.tickets.data.Sprints {
-			label := fmt.Sprintf("%s (#%d)", sprint.Name, sprint.ID)
-			if query != "" && !strings.Contains(strings.ToLower(label), query) {
+			display := fmt.Sprintf("%s (#%d)", sprint.Name, sprint.ID)
+			if query != "" && !strings.Contains(strings.ToLower(display), query) {
 				continue
 			}
 			id := sprint.ID
@@ -334,17 +367,17 @@ func (m Model) filteredCreatePickerItems() []createPickerItem {
 
 func (m Model) renderCreatePicker(width, height int) string {
 	items := m.filteredCreatePickerItems()
-	maybeEmpty := []string{
+	lines := []string{
 		lipgloss.NewStyle().Bold(true).Render(m.createPickerTitle()),
+		"type to search, j/k move, Enter select, Esc close",
 		"Query: " + m.create.picker.query,
 		"",
 	}
 	if len(items) == 0 {
-		maybeEmpty = append(maybeEmpty, "No results")
-		return lipgloss.NewStyle().Width(width).Height(height).Padding(1).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("208")).Render(strings.Join(maybeEmpty, "\n"))
+		lines = append(lines, m.createPickerEmptyState())
+		return lipgloss.NewStyle().Width(width).Height(height).Padding(1).Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("208")).Render(strings.Join(lines, "\n"))
 	}
 
-	lines := maybeEmpty
 	for idx, item := range items {
 		prefix := "  "
 		style := lipgloss.NewStyle()
@@ -366,6 +399,13 @@ func (m Model) createPickerTitle() string {
 	default:
 		return ""
 	}
+}
+
+func (m Model) createPickerEmptyState() string {
+	if m.create.picker.kind == createPickerSprint {
+		return "No sprint records exist yet. Choose Backlog or create a sprint elsewhere."
+	}
+	return "No matching epics."
 }
 
 func (m Model) submitCreateTicket() Model {
@@ -465,4 +505,15 @@ func (m Model) lookupSprintName(sprintID *int64) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func isPrintableRunes(runes []rune) bool {
+	if len(runes) == 0 {
+		return false
+	}
+	return true
+}
+
+func isSpaceKey(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeySpace || msg.String() == "space"
 }

@@ -162,7 +162,7 @@ func renderSelectedTicketPanel(width, height int, ticket *kanban.TicketDetail) s
 		"Description:",
 		ticket.Description,
 		"",
-		fmt.Sprintf("Story Points: %d", ticket.StoryPoints),
+		fmt.Sprintf("Story Points: %s", kanban.FormatStoryPoints(ticket.StoryPoints)),
 		fmt.Sprintf("Flag: %t", ticket.Blocked),
 		fmt.Sprintf("Parent: %s", ticket.EpicName),
 		fmt.Sprintf("Type: %s", ticket.Type),
@@ -207,7 +207,7 @@ func renderBoardColumns(width, height int, columns []kanban.BoardColumn, focused
 					ticket.TicketID,
 					ticket.Title,
 					ticket.EpicName,
-					fmt.Sprintf("%d pts", ticket.StoryPoints),
+					fmt.Sprintf("%s pts", kanban.FormatStoryPoints(ticket.StoryPoints)),
 				))
 			cards = append(cards, card)
 		}

@@ -50,7 +50,7 @@ func newTestModel(t *testing.T) Model {
 	if err != nil {
 		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	create := func(title string, status kanban.TicketStatus, blocked bool, points int) kanban.TicketDetail {
+	create := func(title string, status kanban.TicketStatus, blocked bool, points float64) kanban.TicketDetail {
 		ticket, err := service.CreateTicket(context.Background(), kanban.CreateTicketInput{
 			Title:       title,
 			Status:      status,
@@ -374,6 +374,95 @@ func TestCreateTicketValidationPreservesInput(t *testing.T) {
 	}
 	if model.create.description != "keep me" {
 		t.Fatalf("expected description preserved, got %q", model.create.description)
+	}
+}
+
+func TestCreateTicketTextFieldTypingAndSpaces(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
+	if model.mode != modeInsert {
+		t.Fatalf("expected insert mode after typing into title, got %v", model.mode)
+	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeySpace})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.create.title != "Hi T" {
+		t.Fatalf("expected title with spaces preserved, got %q", model.create.title)
+	}
+}
+
+func TestCreateTicketTextFieldStartsWithSpaceKey(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeySpace})
+	if model.mode != modeInsert {
+		t.Fatalf("expected insert mode after leading space, got %v", model.mode)
+	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.create.title != " A" {
+		t.Fatalf("expected title to preserve leading space, got %q", model.create.title)
+	}
+}
+
+func TestCreateTicketAllowsDecimalStoryPoints(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model.create.title = "Decimal points"
+	model.create.storyPoints = "0.5"
+	model = model.submitCreateTicket()
+	if model.selectedTicket == nil {
+		t.Fatal("expected created ticket selected")
+	}
+	if model.selectedTicket.StoryPoints != 0.5 {
+		t.Fatalf("expected decimal story points, got %v", model.selectedTicket.StoryPoints)
+	}
+}
+
+func TestCreateTicketBlocksNumericRouteSwitching(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected create route to stay active, got %v", model.activeRoute)
+	}
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyTab})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyTab})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected create route to stay active while editing story points, got %v", model.activeRoute)
+	}
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected create route to stay active in insert mode, got %v", model.activeRoute)
+	}
+}
+
+func TestCreateTicketViewShowsInlineHelpAndSprintHint(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	model = updateModel(t, model, tea.WindowSizeMsg{Width: 120, Height: 30})
+	view := model.View()
+	if !strings.Contains(view, "1-4 routes disabled while creating") {
+		t.Fatalf("expected modal help in create view, got %q", view)
+	}
+	if !strings.Contains(view, "Press Enter on Sprint to choose an existing sprint") {
+		t.Fatalf("expected sprint hint in create view, got %q", view)
 	}
 }
 

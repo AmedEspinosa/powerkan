@@ -73,8 +73,8 @@ func (s *Service) LoadBoard(ctx context.Context) (BoardData, error) {
 		return BoardData{}, err
 	}
 
-	totalPoints := 0
-	donePoints := 0
+	totalPoints := 0.0
+	donePoints := 0.0
 	for _, ticket := range tickets {
 		totalPoints += ticket.StoryPoints
 		if ticket.Status == TicketStatusDone {
@@ -144,7 +144,7 @@ func (s *Service) ListTickets(ctx context.Context, filters TicketListFilters) (T
 	defer rows.Close()
 
 	var tickets []Ticket
-	totalPoints := 0
+	totalPoints := 0.0
 	for rows.Next() {
 		ticket, err := scanTicket(rows)
 		if err != nil {
@@ -393,7 +393,8 @@ func (s *Service) ListSprints(ctx context.Context, filters SprintListFilters) ([
 			continue
 		}
 
-		var totalPoints, pointsCompleted, ticketCount int
+		var totalPoints, pointsCompleted float64
+		var ticketCount int
 		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(story_points), 0), COALESCE(SUM(CASE WHEN status = 'DONE' THEN story_points ELSE 0 END), 0), COUNT(1)
 			FROM tickets WHERE sprint_id = ?`, sprint.ID).Scan(&totalPoints, &pointsCompleted, &ticketCount); err != nil {
 			return nil, err
@@ -702,7 +703,7 @@ func (s *Service) ExportTicketMarkdown(ctx context.Context, ticketID string, out
 	} else {
 		b.WriteString("- Sprint: `BACKLOG`\n")
 	}
-	b.WriteString(fmt.Sprintf("- Story Points: `%d`\n", data.StoryPoints))
+	b.WriteString(fmt.Sprintf("- Story Points: `%s`\n", FormatStoryPoints(data.StoryPoints)))
 	b.WriteString(fmt.Sprintf("- Blocked: `%t`\n", data.Blocked))
 	if data.GitHubPRURL != "" {
 		b.WriteString(fmt.Sprintf("- GitHub PR: %s\n", data.GitHubPRURL))
@@ -770,7 +771,7 @@ func (s *Service) ExportTicketCSV(ctx context.Context, ticketID string, outPath 
 		string(data.Type),
 		data.EpicName,
 		sprintName,
-		fmt.Sprintf("%d", data.StoryPoints),
+		FormatStoryPoints(data.StoryPoints),
 		fmt.Sprintf("%t", data.Blocked),
 		data.GitHubPRURL,
 		data.Description,
@@ -1198,18 +1199,18 @@ func inclusiveDays(start, end time.Time) int {
 	return int(end.Sub(start).Hours()/24) + 1
 }
 
-func ratio(a, b int) float64 {
+func ratio(a, b float64) float64 {
 	if b == 0 {
 		return 0
 	}
-	return float64(a) / float64(b) * 100
+	return a / b * 100
 }
 
-func divide(a, b int) float64 {
+func divide(a float64, b int) float64 {
 	if b == 0 {
 		return 0
 	}
-	return float64(a) / float64(b)
+	return a / float64(b)
 }
 
 func initials(name string) string {

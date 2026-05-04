@@ -393,7 +393,7 @@ func ticketCellValue(ticket kanban.Ticket, column int) string {
 	case 3:
 		return string(ticket.Type)
 	case 4:
-		return fmt.Sprintf("%d", ticket.StoryPoints)
+		return kanban.FormatStoryPoints(ticket.StoryPoints)
 	case 5:
 		if ticket.SprintID == nil {
 			return "Backlog"
@@ -418,7 +418,7 @@ func detailFieldValue(ticket kanban.TicketDetail, field int) string {
 	case 1:
 		return ticket.Description
 	case 2:
-		return fmt.Sprintf("%d", ticket.StoryPoints)
+		return kanban.FormatStoryPoints(ticket.StoryPoints)
 	case 3:
 		return string(ticket.Status)
 	case 4:

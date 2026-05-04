@@ -226,7 +226,7 @@ func TestCreateTicketValidation(t *testing.T) {
 				Title:       "Backlog",
 				Status:      TicketStatusNotStarted,
 				Type:        TicketTypeFeature,
-				StoryPoints: 1,
+				StoryPoints: 0.5,
 				EpicID:      epic.ID,
 				SprintID:    nil,
 			},
@@ -255,6 +255,9 @@ func TestCreateTicketValidation(t *testing.T) {
 				}
 				if ticket.Title != strings.TrimSpace(tt.input.Title) {
 					t.Fatalf("expected trimmed title, got %q", ticket.Title)
+				}
+				if ticket.StoryPoints != tt.input.StoryPoints {
+					t.Fatalf("expected story points %v, got %v", tt.input.StoryPoints, ticket.StoryPoints)
 				}
 				return
 			}
@@ -357,7 +360,7 @@ func TestListTicketsFiltersAndTotalPoints(t *testing.T) {
 		t.Fatalf("expected 1 filtered ticket, got %d", len(result.Tickets))
 	}
 	if result.TotalPoints != 5 {
-		t.Fatalf("expected filtered total points 5, got %d", result.TotalPoints)
+		t.Fatalf("expected filtered total points 5, got %v", result.TotalPoints)
 	}
 }
 
@@ -447,7 +450,7 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 		Title:       "Export me",
 		Status:      TicketStatusDone,
 		Type:        TicketTypeDocs,
-		StoryPoints: 2,
+		StoryPoints: 0.5,
 		EpicID:      epic.ID,
 		SprintID:    &sprint.ID,
 		Description: "Ready for export",
@@ -496,6 +499,9 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	if !strings.Contains(string(mdData), "2026-04-24T14:17:18Z [URL] https://example.com/export") {
 		t.Fatalf("expected markdown to preserve newest comment timestamp, got %q", string(mdData))
 	}
+	if !strings.Contains(string(mdData), "- Story Points: `0.5`") {
+		t.Fatalf("expected markdown to preserve decimal story points, got %q", string(mdData))
+	}
 	if !strings.Contains(string(mdData), "2026-04-24T14:16:17Z [TEXT] Looks good") {
 		t.Fatalf("expected markdown to preserve older comment timestamp, got %q", string(mdData))
 	}
@@ -516,6 +522,9 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	}
 	if !strings.Contains(string(csvData), "2026-04-24T14:16:17Z|TEXT|Looks good") {
 		t.Fatalf("expected CSV to preserve older comment timestamp, got %q", string(csvData))
+	}
+	if !strings.Contains(string(csvData), ",0.5,") {
+		t.Fatalf("expected CSV to preserve decimal story points, got %q", string(csvData))
 	}
 }
 
