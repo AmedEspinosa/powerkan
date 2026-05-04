@@ -2,6 +2,7 @@ package kanban
 
 import (
 	"context"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -193,6 +194,39 @@ func TestCreateTicketValidation(t *testing.T) {
 				Status:      TicketStatusNotStarted,
 				Type:        TicketTypeFeature,
 				StoryPoints: -1,
+				EpicID:      epic.ID,
+			},
+			want: "story points must be greater than or equal to 0",
+		},
+		{
+			name: "nan story points",
+			input: CreateTicketInput{
+				Title:       "NaN points",
+				Status:      TicketStatusNotStarted,
+				Type:        TicketTypeFeature,
+				StoryPoints: math.NaN(),
+				EpicID:      epic.ID,
+			},
+			want: "story points must be greater than or equal to 0",
+		},
+		{
+			name: "positive infinity story points",
+			input: CreateTicketInput{
+				Title:       "Infinite points",
+				Status:      TicketStatusNotStarted,
+				Type:        TicketTypeFeature,
+				StoryPoints: math.Inf(1),
+				EpicID:      epic.ID,
+			},
+			want: "story points must be greater than or equal to 0",
+		},
+		{
+			name: "negative infinity story points",
+			input: CreateTicketInput{
+				Title:       "Negative infinite points",
+				Status:      TicketStatusNotStarted,
+				Type:        TicketTypeFeature,
+				StoryPoints: math.Inf(-1),
 				EpicID:      epic.ID,
 			},
 			want: "story points must be greater than or equal to 0",

@@ -427,6 +427,27 @@ func TestCreateTicketAllowsDecimalStoryPoints(t *testing.T) {
 	}
 }
 
+func TestCreateTicketRejectsNonFiniteStoryPoints(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model = model.openCreateTicket(routeTickets, nil)
+	initialTicketCount := len(model.tickets.data.Tickets)
+	model.create.title = "Invalid points"
+	model.create.storyPoints = "NaN"
+	model = model.submitCreateTicket()
+
+	if model.activeRoute != routeCreateTicket {
+		t.Fatalf("expected to stay on create route, got %v", model.activeRoute)
+	}
+	if model.create.errors[createFieldStoryPoints] == "" {
+		t.Fatal("expected story points validation error")
+	}
+	if len(model.tickets.data.Tickets) != initialTicketCount {
+		t.Fatalf("expected no ticket to be created, got %d tickets", len(model.tickets.data.Tickets))
+	}
+}
+
 func TestCreateTicketBlocksNumericRouteSwitching(t *testing.T) {
 	t.Parallel()
 
@@ -463,6 +484,66 @@ func TestCreateTicketViewShowsInlineHelpAndSprintHint(t *testing.T) {
 	}
 	if !strings.Contains(view, "Press Enter on Sprint to choose an existing sprint") {
 		t.Fatalf("expected sprint hint in create view, got %q", view)
+	}
+}
+
+func TestCreateTicketPickerClampsFocusAfterFiltering(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 2, Name: "Beta"},
+		{ID: 3, Name: "Berry"},
+		{ID: 4, Name: "Gamma"},
+	}
+	model = model.openCreateTicket(routeTickets, nil)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 2, Name: "Beta"},
+		{ID: 3, Name: "Berry"},
+		{ID: 4, Name: "Gamma"},
+	}
+	model.create.focusedField = createFieldEpic
+	model.openCreatePicker(createPickerEpic)
+	model.create.picker.focused = 2
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if model.create.picker.kind != createPickerNone {
+		t.Fatalf("expected picker to close after selecting filtered item, got %v", model.create.picker.kind)
+	}
+	if model.create.epicName != "Beta" {
+		t.Fatalf("expected filtered epic selection to clamp to Beta, got %q", model.create.epicName)
+	}
+}
+
+func TestCreateTicketPickerEnterNoopsWhenFilterRemovesAllItems(t *testing.T) {
+	t.Parallel()
+
+	model := newTestModel(t)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 1, Name: "Alpha"},
+		{ID: 2, Name: "Beta"},
+	}
+	model = model.openCreateTicket(routeTickets, nil)
+	model.tickets.data.Epics = []kanban.Epic{
+		{ID: 1, Name: "Alpha"},
+		{ID: 2, Name: "Beta"},
+	}
+	model.create.focusedField = createFieldEpic
+	model.openCreatePicker(createPickerEpic)
+	model.create.picker.focused = 1
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if model.create.picker.focused != 0 {
+		t.Fatalf("expected picker focus reset to 0, got %d", model.create.picker.focused)
+	}
+	if model.create.picker.kind != createPickerEpic {
+		t.Fatalf("expected picker to remain open when no items match, got %v", model.create.picker.kind)
 	}
 }
 

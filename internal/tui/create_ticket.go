@@ -205,6 +205,8 @@ func (m *Model) openCreatePicker(kind createPickerKind) {
 
 func (m Model) handleCreatePickerKey(msg tea.KeyMsg) Model {
 	items := m.filteredCreatePickerItems()
+	m.normalizeCreatePickerFocus(len(items))
+	items = m.filteredCreatePickerItems()
 	switch {
 	case msg.String() == "tab" || msg.String() == "j" || msg.String() == "down" || msg.Type == tea.KeyDown:
 		if m.create.picker.focused < len(items)-1 {

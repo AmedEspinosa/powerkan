@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1118,7 +1119,7 @@ func validateCreateTicketInput(ctx context.Context, tx *sql.Tx, input CreateTick
 	if !isValidTicketType(input.Type) {
 		return fmt.Errorf("invalid ticket type %q", input.Type)
 	}
-	if input.StoryPoints < 0 {
+	if !isFiniteStoryPoints(input.StoryPoints) || input.StoryPoints < 0 {
 		return fmt.Errorf("story points must be greater than or equal to 0")
 	}
 	if _, err := lookupEpicName(ctx, tx, input.EpicID); err != nil {
@@ -1137,6 +1138,10 @@ func validateCreateTicketInput(ctx context.Context, tx *sql.Tx, input CreateTick
 		}
 	}
 	return nil
+}
+
+func isFiniteStoryPoints(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func isValidTicketStatus(status TicketStatus) bool {

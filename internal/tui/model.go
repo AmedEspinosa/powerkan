@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -302,6 +303,7 @@ func (m *Model) updateActiveBuffer(value string) {
 		m.create.editingValue = value
 	case m.activeRoute == routeCreateTicket && m.create.picker.editingQuery:
 		m.create.picker.query = value
+		m.normalizeCreatePickerFocus(len(m.filteredCreatePickerItems()))
 	}
 }
 
@@ -717,6 +719,9 @@ func parseBool(value string) (bool, error) {
 func parseStoryPoints(value string) (float64, error) {
 	n, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
 	if err != nil {
+		return 0, fmt.Errorf("invalid story points %q", value)
+	}
+	if math.IsNaN(n) || math.IsInf(n, 0) {
 		return 0, fmt.Errorf("invalid story points %q", value)
 	}
 	return n, nil
