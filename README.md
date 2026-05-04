@@ -197,7 +197,6 @@ powerkan webhook sprint-end --force
 - Board filter UI is limited to blocked-only toggle
 - Board search/filter state is local to the board and does not affect the tickets table
 - Calendar widget is still a placeholder
-- Ticket creation is not available in the TUI yet
 - No GitHub sync yet
 - No advanced table virtualization yet
 

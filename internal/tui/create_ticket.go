@@ -98,8 +98,7 @@ func (m Model) beginCreateFieldEdit(seed string) Model {
 }
 
 func (m Model) openCreateTicket(caller route, defaultSprintID *int64) Model {
-	m.refreshSupportData()
-	defaultEpic, err := m.service.EnsureDefaultEpic(context.Background())
+	defaultEpic, err := m.service.EnsureCreateEpic(context.Background())
 	if err != nil {
 		m.errorMessage = err.Error()
 		return m
@@ -111,7 +110,6 @@ func (m Model) openCreateTicket(caller route, defaultSprintID *int64) Model {
 		callerSelectedTicket: m.currentSelectedTicketID(),
 		ticketType:           kanban.TicketTypeFeature,
 		storyPoints:          "0",
-		defaultSprintID:      cloneInt64Pointer(defaultSprintID),
 		errors:               make(map[int]string),
 		epicID:               defaultEpic.ID,
 		epicName:             defaultEpic.Name,

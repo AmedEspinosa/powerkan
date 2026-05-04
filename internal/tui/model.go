@@ -43,7 +43,7 @@ type service interface {
 	UpdateTicket(ctx context.Context, ticketID string, input kanban.UpdateTicketInput) (kanban.TicketDetail, error)
 	MoveTicket(ctx context.Context, ticketID string, delta int) (kanban.TicketDetail, error)
 	AddComment(ctx context.Context, ticketID string, input kanban.AddCommentInput) (kanban.TicketComment, error)
-	EnsureDefaultEpic(ctx context.Context) (kanban.Epic, error)
+	EnsureCreateEpic(ctx context.Context) (kanban.Epic, error)
 	ListEpics(ctx context.Context) ([]kanban.Epic, error)
 	ListSprints(ctx context.Context, filters kanban.SprintListFilters) ([]kanban.SprintSummary, error)
 	ExportTicketMarkdown(ctx context.Context, ticketID string, outPath string) (string, error)
@@ -106,7 +106,6 @@ type createTicketModel struct {
 	sprintID             *int64
 	sprintName           string
 	sprintHint           string
-	defaultSprintID      *int64
 	errors               map[int]string
 	picker               createPickerModel
 }

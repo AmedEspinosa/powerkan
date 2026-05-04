@@ -105,13 +105,13 @@ func TestCreateTicketGeneratesStructuredIDAndCommentsNewestFirst(t *testing.T) {
 	}
 }
 
-func TestEnsureDefaultEpicCreatesInboxWhenMissing(t *testing.T) {
+func TestEnsureCreateEpicCreatesInboxWhenMissing(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
-	epic, err := service.EnsureDefaultEpic(context.Background())
+	epic, err := service.EnsureCreateEpic(context.Background())
 	if err != nil {
-		t.Fatalf("EnsureDefaultEpic returned error: %v", err)
+		t.Fatalf("EnsureCreateEpic returned error: %v", err)
 	}
 	if epic.Name != DefaultEpicName {
 		t.Fatalf("expected %q epic, got %q", DefaultEpicName, epic.Name)
@@ -126,7 +126,7 @@ func TestEnsureDefaultEpicCreatesInboxWhenMissing(t *testing.T) {
 	}
 }
 
-func TestEnsureDefaultEpicReturnsExistingEpicWhenPresent(t *testing.T) {
+func TestEnsureCreateEpicReturnsExistingEpicWhenPresent(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
@@ -134,9 +134,9 @@ func TestEnsureDefaultEpicReturnsExistingEpicWhenPresent(t *testing.T) {
 		t.Fatalf("CreateEpic returned error: %v", err)
 	}
 
-	epic, err := service.EnsureDefaultEpic(context.Background())
+	epic, err := service.EnsureCreateEpic(context.Background())
 	if err != nil {
-		t.Fatalf("EnsureDefaultEpic returned error: %v", err)
+		t.Fatalf("EnsureCreateEpic returned error: %v", err)
 	}
 	if epic.Name != "Platform" {
 		t.Fatalf("expected existing epic, got %q", epic.Name)

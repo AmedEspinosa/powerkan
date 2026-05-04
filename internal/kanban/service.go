@@ -245,7 +245,7 @@ func (s *Service) ListEpics(ctx context.Context) ([]Epic, error) {
 	return epics, rows.Err()
 }
 
-func (s *Service) EnsureDefaultEpic(ctx context.Context) (Epic, error) {
+func (s *Service) EnsureCreateEpic(ctx context.Context) (Epic, error) {
 	epics, err := s.ListEpics(ctx)
 	if err != nil {
 		return Epic{}, err
@@ -456,11 +456,7 @@ func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (Ti
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := validateCreateTicketInput(ctx, tx, input); err != nil {
-		return TicketDetail{}, err
-	}
-
-	epicName, err := lookupEpicName(ctx, tx, input.EpicID)
+	epicName, err := validateCreateTicketInput(ctx, tx, input)
 	if err != nil {
 		return TicketDetail{}, err
 	}
@@ -1109,35 +1105,36 @@ func lookupEpicName(ctx context.Context, tx *sql.Tx, epicID int64) (string, erro
 	return name, nil
 }
 
-func validateCreateTicketInput(ctx context.Context, tx *sql.Tx, input CreateTicketInput) error {
+func validateCreateTicketInput(ctx context.Context, tx *sql.Tx, input CreateTicketInput) (string, error) {
 	if strings.TrimSpace(input.Title) == "" {
-		return fmt.Errorf("title is required")
+		return "", fmt.Errorf("title is required")
 	}
 	if !isValidTicketStatus(input.Status) {
-		return fmt.Errorf("invalid ticket status %q", input.Status)
+		return "", fmt.Errorf("invalid ticket status %q", input.Status)
 	}
 	if !isValidTicketType(input.Type) {
-		return fmt.Errorf("invalid ticket type %q", input.Type)
+		return "", fmt.Errorf("invalid ticket type %q", input.Type)
 	}
 	if !isFiniteStoryPoints(input.StoryPoints) || input.StoryPoints < 0 {
-		return fmt.Errorf("story points must be greater than or equal to 0")
+		return "", fmt.Errorf("story points must be greater than or equal to 0")
 	}
-	if _, err := lookupEpicName(ctx, tx, input.EpicID); err != nil {
+	epicName, err := lookupEpicName(ctx, tx, input.EpicID)
+	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return fmt.Errorf("unknown epic id %d", input.EpicID)
+			return "", fmt.Errorf("unknown epic id %d", input.EpicID)
 		}
-		return err
+		return "", err
 	}
 	if input.SprintID != nil {
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE id = ?`, *input.SprintID).Scan(&count); err != nil {
-			return err
+			return "", err
 		}
 		if count == 0 {
-			return fmt.Errorf("unknown sprint id %d", *input.SprintID)
+			return "", fmt.Errorf("unknown sprint id %d", *input.SprintID)
 		}
 	}
-	return nil
+	return epicName, nil
 }
 
 func isFiniteStoryPoints(value float64) bool {

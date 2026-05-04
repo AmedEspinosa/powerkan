@@ -802,7 +802,7 @@ func (s *countingService) AddComment(context.Context, string, kanban.AddCommentI
 	return kanban.TicketComment{}, nil
 }
 
-func (s *countingService) EnsureDefaultEpic(context.Context) (kanban.Epic, error) {
+func (s *countingService) EnsureCreateEpic(context.Context) (kanban.Epic, error) {
 	return kanban.Epic{ID: 1, Name: "Epic One"}, nil
 }
 
