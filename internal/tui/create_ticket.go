@@ -98,11 +98,6 @@ func (m Model) beginCreateFieldEdit(seed string) Model {
 }
 
 func (m Model) openCreateTicket(caller route, defaultSprintID *int64) Model {
-	defaultEpic, err := m.service.EnsureCreateEpic(context.Background())
-	if err != nil {
-		m.errorMessage = err.Error()
-		return m
-	}
 	m.refreshSupportData()
 
 	model := createTicketModel{
@@ -111,8 +106,10 @@ func (m Model) openCreateTicket(caller route, defaultSprintID *int64) Model {
 		ticketType:           kanban.TicketTypeFeature,
 		storyPoints:          "0",
 		errors:               make(map[int]string),
-		epicID:               defaultEpic.ID,
-		epicName:             defaultEpic.Name,
+	}
+	if len(m.tickets.data.Epics) > 0 {
+		model.epicID = m.tickets.data.Epics[0].ID
+		model.epicName = m.tickets.data.Epics[0].Title
 	}
 
 	switch {
@@ -419,12 +416,14 @@ func (m Model) submitCreateTicket() Model {
 	if err != nil || points < 0 {
 		m.create.errors[createFieldStoryPoints] = "Story points must be a number >= 0"
 	}
-	if m.create.epicID == 0 {
-		m.create.errors[createFieldEpic] = "Epic is required"
-	}
 	if len(m.create.errors) > 0 {
 		m.errorMessage = "Fix validation errors"
 		return m
+	}
+
+	var epicID *int64
+	if m.create.epicID != 0 {
+		epicID = cloneInt64Pointer(&m.create.epicID)
 	}
 
 	detail, err := m.service.CreateTicket(context.Background(), kanban.CreateTicketInput{
@@ -433,7 +432,7 @@ func (m Model) submitCreateTicket() Model {
 		Type:        m.create.ticketType,
 		Blocked:     false,
 		StoryPoints: points,
-		EpicID:      m.create.epicID,
+		EpicID:      epicID,
 		SprintID:    cloneInt64Pointer(m.create.sprintID),
 		GitHubPRURL: "",
 		Description: m.create.description,

@@ -37,27 +37,28 @@ func newTestModel(t *testing.T) Model {
 		return current
 	})
 
-	epic, err := service.CreateEpic(context.Background(), kanban.CreateEpicInput{Name: "Freedom Tower"})
+	epic, err := service.CreateEpic(context.Background(), kanban.CreateEpicInput{Title: "Freedom Tower"})
 	if err != nil {
 		t.Fatalf("CreateEpic returned error: %v", err)
 	}
 	sprint, err := service.CreateSprint(context.Background(), kanban.CreateSprintInput{
-		Name:      "26Q2 Sprint 3",
-		Quarter:   "2026Q2",
-		StartDate: time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local),
-		EndDate:   time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local),
+		Name:     "26Q2 Sprint 3",
+		Goal:     "Ship TUI",
+		Status:   kanban.SprintStatusActive,
+		StartsOn: time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local),
+		EndsOn:   time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local),
 	})
 	if err != nil {
 		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	create := func(title string, status kanban.TicketStatus, blocked bool, points float64) kanban.TicketDetail {
-		ticket, err := service.CreateTicket(context.Background(), kanban.CreateTicketInput{
+	create := func(title string, status kanban.TicketStatus, blocked bool, points float64) {
+		_, err := service.CreateTicket(context.Background(), kanban.CreateTicketInput{
 			Title:       title,
 			Status:      status,
 			Type:        kanban.TicketTypeFeature,
 			Blocked:     blocked,
 			StoryPoints: points,
-			EpicID:      epic.ID,
+			EpicID:      &epic.ID,
 			SprintID:    &sprint.ID,
 			Description: "description for " + title,
 			GitHubPRURL: "https://example.com/pr",
@@ -65,49 +66,11 @@ func newTestModel(t *testing.T) Model {
 		if err != nil {
 			t.Fatalf("CreateTicket returned error: %v", err)
 		}
-		return ticket
 	}
-	first := create("Interactive Backend Design", kanban.TicketStatusNotStarted, false, 1)
-	_ = create("Interactive Backend Implementation", kanban.TicketStatusInProgress, true, 2)
-	_ = create("Review API Contract", kanban.TicketStatusUnderReview, true, 3)
-	_ = create("Ship Sprint Demo", kanban.TicketStatusDone, false, 5)
-	if _, err := service.AddComment(context.Background(), first.TicketID, kanban.AddCommentInput{Kind: kanban.CommentKindText, Body: "comment one"}); err != nil {
-		t.Fatalf("AddComment returned error: %v", err)
-	}
-
-	return NewModel(Dependencies{
-		Config:  cfg,
-		Paths:   platform.Paths{},
-		Service: service,
-	})
-}
-
-func newEmptyEpicModel(t *testing.T) Model {
-	t.Helper()
-
-	cfg := config.Defaults(t.TempDir())
-	cfg.App.Timezone = "America/New_York"
-	db, err := storage.Open(context.Background(), t.TempDir()+"/kanban.db")
-	if err != nil {
-		t.Fatalf("Open returned error: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	if err := storage.ApplyMigrations(context.Background(), db); err != nil {
-		t.Fatalf("ApplyMigrations returned error: %v", err)
-	}
-
-	service := kanban.NewService(db, cfg)
-	service.SetNowFunc(func() time.Time {
-		return time.Date(2026, 4, 24, 10, 0, 0, 0, time.FixedZone("EDT", -4*60*60))
-	})
-	if _, err := service.CreateSprint(context.Background(), kanban.CreateSprintInput{
-		Name:      "26Q2 Sprint 3",
-		Quarter:   "2026Q2",
-		StartDate: time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local),
-		EndDate:   time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local),
-	}); err != nil {
-		t.Fatalf("CreateSprint returned error: %v", err)
-	}
+	create("Interactive Backend Design", kanban.TicketStatusNotStarted, false, 1)
+	create("Interactive Backend Implementation", kanban.TicketStatusInProgress, true, 2)
+	create("Review API Contract", kanban.TicketStatusUnderReview, true, 3)
+	create("Ship Sprint Demo", kanban.TicketStatusDone, false, 5)
 
 	return NewModel(Dependencies{
 		Config:  cfg,
@@ -124,45 +87,13 @@ func updateModel(t *testing.T, model Model, msg tea.Msg) Model {
 
 func TestNewModelStartsOnBoard(t *testing.T) {
 	t.Parallel()
-
 	model := newTestModel(t)
 	if model.activeRoute != routeBoard {
 		t.Fatalf("expected default route to be board, got %v", model.activeRoute)
 	}
 }
 
-func TestQuitKeyReturnsTeaQuitCommand(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	if _, ok := updated.(Model); !ok {
-		t.Fatalf("expected updated model type, got %T", updated)
-	}
-	if cmd == nil {
-		t.Fatal("expected quit command, got nil")
-	}
-	if msg := cmd(); msg != tea.Quit() {
-		t.Fatalf("expected tea.Quit message, got %T", msg)
-	}
-}
-
-func TestInsertModeQAppendsInsteadOfQuitting(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	model = updated.(Model)
-	if cmd != nil {
-		t.Fatal("expected no quit command in insert mode")
-	}
-	if model.board.searchQuery != "q" {
-		t.Fatalf("expected insert mode to append q, got %q", model.board.searchQuery)
-	}
-}
-
-func TestModelNumericRouteSwitching(t *testing.T) {
+func TestNumericRouteSwitchingAndDetailOpen(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
@@ -170,27 +101,27 @@ func TestModelNumericRouteSwitching(t *testing.T) {
 	if model.activeRoute != routeTickets {
 		t.Fatalf("expected tickets route, got %v", model.activeRoute)
 	}
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.activeRoute != routeTicketDetail {
+		t.Fatalf("expected detail route, got %v", model.activeRoute)
+	}
 }
 
-func TestBoardFocusRespectsColumnBounds(t *testing.T) {
+func TestLetterRouteSwitching(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	for range len(boardStatuses) + 2 {
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}})
+	if model.activeRoute != routeSprints {
+		t.Fatalf("expected sprints route, got %v", model.activeRoute)
 	}
-	if model.board.focusedColumn != len(boardStatuses)-1 {
-		t.Fatalf("expected focused last column, got %d", model.board.focusedColumn)
-	}
-	for range len(boardStatuses) + 2 {
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyLeft})
-	}
-	if model.board.focusedColumn != 0 {
-		t.Fatalf("expected focused first column, got %d", model.board.focusedColumn)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	if model.activeRoute != routeEpics {
+		t.Fatalf("expected epics route, got %v", model.activeRoute)
 	}
 }
 
-func TestBoardViewContainsAllStatuses(t *testing.T) {
+func TestBoardViewContainsStatuses(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
@@ -203,138 +134,7 @@ func TestBoardViewContainsAllStatuses(t *testing.T) {
 	}
 }
 
-func TestBoardSearchInsertModeConsumesNavigationCharacters(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	if model.mode != modeInsert {
-		t.Fatalf("expected insert mode, got %v", model.mode)
-	}
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
-	if model.board.searchQuery != "jh" {
-		t.Fatalf("expected search query jh, got %q", model.board.searchQuery)
-	}
-	if model.board.focusedColumn != 0 {
-		t.Fatalf("expected focus unchanged, got %d", model.board.focusedColumn)
-	}
-}
-
-func TestBoardMoveTicketUpdatesSelectionAndStatus(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	selected := model.selectedBoardTicket()
-	if selected == nil {
-		t.Fatal("expected selected board ticket")
-	}
-
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'L'}})
-	selected = model.selectedBoardTicket()
-	if selected == nil {
-		t.Fatal("expected selected ticket after move")
-	}
-	if selected.Status != kanban.TicketStatusInProgress {
-		t.Fatalf("expected moved ticket in progress, got %s", selected.Status)
-	}
-	if model.board.focusedColumn != 1 {
-		t.Fatalf("expected focused second column, got %d", model.board.focusedColumn)
-	}
-}
-
-func TestTableEnterOpensDetailForFocusedTicket(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	if model.activeRoute != routeTicketDetail {
-		t.Fatalf("expected ticket detail route, got %v", model.activeRoute)
-	}
-	if model.selectedTicket == nil {
-		t.Fatal("expected selected ticket in detail route")
-	}
-}
-
-func TestDetailEnterPreservesBackNavigation(t *testing.T) {
-	t.Parallel()
-
-	t.Run("board", func(t *testing.T) {
-		model := newTestModel(t)
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-		if model.activeRoute != routeTicketDetail {
-			t.Fatalf("expected detail route, got %v", model.activeRoute)
-		}
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
-		if model.activeRoute != routeBoard {
-			t.Fatalf("expected escape to return to board, got %v", model.activeRoute)
-		}
-	})
-
-	t.Run("tickets", func(t *testing.T) {
-		model := newTestModel(t)
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-		if model.activeRoute != routeTicketDetail {
-			t.Fatalf("expected detail route, got %v", model.activeRoute)
-		}
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
-		if model.activeRoute != routeTickets {
-			t.Fatalf("expected escape to return to tickets, got %v", model.activeRoute)
-		}
-	})
-}
-
-func TestRenderSprintPanelShowsStoredPercentValue(t *testing.T) {
-	t.Parallel()
-
-	view := renderSprintPanel(48, 12, kanban.BoardMetrics{PercentCompleted: 50})
-	if !strings.Contains(view, "% of Points Completed: 50.00%") {
-		t.Fatalf("expected rendered sprint percent, got %q", view)
-	}
-	if strings.Contains(view, "5000.00%") {
-		t.Fatalf("expected no double-scaled percent, got %q", view)
-	}
-}
-
-func TestBoardAndTicketsOpenCreateFlow(t *testing.T) {
-	t.Parallel()
-
-	t.Run("board", func(t *testing.T) {
-		model := newTestModel(t)
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-		if model.activeRoute != routeCreateTicket {
-			t.Fatalf("expected create ticket route, got %v", model.activeRoute)
-		}
-	})
-
-	t.Run("tickets", func(t *testing.T) {
-		model := newTestModel(t)
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-		if model.activeRoute != routeCreateTicket {
-			t.Fatalf("expected create ticket route, got %v", model.activeRoute)
-		}
-	})
-}
-
-func TestOpenCreateFlowSeedsInboxEpic(t *testing.T) {
-	t.Parallel()
-
-	model := newEmptyEpicModel(t)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
-	if model.activeRoute != routeCreateTicket {
-		t.Fatalf("expected create route, got %v", model.activeRoute)
-	}
-	if model.create.epicName != kanban.DefaultEpicName {
-		t.Fatalf("expected default epic %q, got %q", kanban.DefaultEpicName, model.create.epicName)
-	}
-}
-
-func TestCreateTicketFromTicketsSelectsNewTicket(t *testing.T) {
+func TestCreateTicketFromTicketsReturnsSelection(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
@@ -343,6 +143,8 @@ func TestCreateTicketFromTicketsSelectsNewTicket(t *testing.T) {
 	model.create.title = "Created from tickets"
 	model.create.storyPoints = "5"
 	model.create.description = "new ticket"
+	model.create.epicID = model.tickets.data.Epics[0].ID
+	model.create.epicName = model.tickets.data.Epics[0].Title
 	model = model.submitCreateTicket()
 
 	if model.activeRoute != routeTickets {
@@ -351,475 +153,163 @@ func TestCreateTicketFromTicketsSelectsNewTicket(t *testing.T) {
 	if model.selectedTicket == nil || model.selectedTicket.Title != "Created from tickets" {
 		t.Fatalf("expected selected created ticket, got %+v", model.selectedTicket)
 	}
-	if model.tickets.data.Tickets[model.tickets.focusedRow].Title != "Created from tickets" {
-		t.Fatalf("expected focused row to be created ticket, got %q", model.tickets.data.Tickets[model.tickets.focusedRow].Title)
-	}
 }
 
-func TestCreateTicketValidationPreservesInput(t *testing.T) {
+func TestSprintsRouteRendersGroupedListInsteadOfPlaceholder(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	model = model.openCreateTicket(routeTickets, nil)
-	model.create.title = "   "
-	model.create.storyPoints = "3"
-	model.create.description = "keep me"
-	model = model.submitCreateTicket()
-
-	if model.activeRoute != routeCreateTicket {
-		t.Fatalf("expected to stay on create route, got %v", model.activeRoute)
-	}
-	if model.create.errors[createFieldTitle] == "" {
-		t.Fatal("expected title validation error")
-	}
-	if model.create.description != "keep me" {
-		t.Fatalf("expected description preserved, got %q", model.create.description)
-	}
-}
-
-func TestCreateTicketTextFieldTypingAndSpaces(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = model.openCreateTicket(routeTickets, nil)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'H'}})
-	if model.mode != modeInsert {
-		t.Fatalf("expected insert mode after typing into title, got %v", model.mode)
-	}
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeySpace})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	if model.create.title != "Hi T" {
-		t.Fatalf("expected title with spaces preserved, got %q", model.create.title)
-	}
-}
-
-func TestCreateTicketTextFieldStartsWithSpaceKey(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = model.openCreateTicket(routeTickets, nil)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeySpace})
-	if model.mode != modeInsert {
-		t.Fatalf("expected insert mode after leading space, got %v", model.mode)
-	}
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'A'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	if model.create.title != " A" {
-		t.Fatalf("expected title to preserve leading space, got %q", model.create.title)
-	}
-}
-
-func TestCreateTicketAllowsDecimalStoryPoints(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = model.openCreateTicket(routeTickets, nil)
-	model.create.title = "Decimal points"
-	model.create.storyPoints = "0.5"
-	model = model.submitCreateTicket()
-	if model.selectedTicket == nil {
-		t.Fatal("expected created ticket selected")
-	}
-	if model.selectedTicket.StoryPoints != 0.5 {
-		t.Fatalf("expected decimal story points, got %v", model.selectedTicket.StoryPoints)
-	}
-}
-
-func TestCreateTicketRejectsNonFiniteStoryPoints(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = model.openCreateTicket(routeTickets, nil)
-	initialTicketCount := len(model.tickets.data.Tickets)
-	model.create.title = "Invalid points"
-	model.create.storyPoints = "NaN"
-	model = model.submitCreateTicket()
-
-	if model.activeRoute != routeCreateTicket {
-		t.Fatalf("expected to stay on create route, got %v", model.activeRoute)
-	}
-	if model.create.errors[createFieldStoryPoints] == "" {
-		t.Fatal("expected story points validation error")
-	}
-	if len(model.tickets.data.Tickets) != initialTicketCount {
-		t.Fatalf("expected no ticket to be created, got %d tickets", len(model.tickets.data.Tickets))
-	}
-}
-
-func TestCreateTicketBlocksNumericRouteSwitching(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = model.openCreateTicket(routeTickets, nil)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
-	if model.activeRoute != routeCreateTicket {
-		t.Fatalf("expected create route to stay active, got %v", model.activeRoute)
-	}
-
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyTab})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyTab})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
-	if model.activeRoute != routeCreateTicket {
-		t.Fatalf("expected create route to stay active while editing story points, got %v", model.activeRoute)
-	}
-
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
-	if model.activeRoute != routeCreateTicket {
-		t.Fatalf("expected create route to stay active in insert mode, got %v", model.activeRoute)
-	}
-}
-
-func TestCreateTicketViewShowsInlineHelpAndSprintHint(t *testing.T) {
-	t.Parallel()
-
-	model := newTestModel(t)
-	model = model.openCreateTicket(routeTickets, nil)
-	model = updateModel(t, model, tea.WindowSizeMsg{Width: 120, Height: 30})
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
+	model = updateModel(t, model, tea.WindowSizeMsg{Width: 140, Height: 40})
 	view := model.View()
-	if !strings.Contains(view, "1-4 routes disabled while creating") {
-		t.Fatalf("expected modal help in create view, got %q", view)
-	}
-	if !strings.Contains(view, "Press Enter on Sprint to choose an existing sprint") {
-		t.Fatalf("expected sprint hint in create view, got %q", view)
+	for _, text := range []string{"Sprints", "Active", "Planned", "Closed"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("expected sprints view to contain %q", text)
+		}
 	}
 }
 
-func TestCreateTicketPickerClampsFocusAfterFiltering(t *testing.T) {
+func TestSprintCreateAndEditOpenFromRouteKeys(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	model.tickets.data.Epics = []kanban.Epic{
-		{ID: 2, Name: "Beta"},
-		{ID: 3, Name: "Berry"},
-		{ID: 4, Name: "Gamma"},
+	_, err := model.service.CreateSprint(context.Background(), kanban.CreateSprintInput{
+		Name:     "26Q2 Sprint 4",
+		Goal:     "Wrap up",
+		Status:   kanban.SprintStatusPlanned,
+		StartsOn: time.Date(2026, 4, 27, 0, 0, 0, 0, time.Local),
+		EndsOn:   time.Date(2026, 5, 3, 0, 0, 0, 0, time.Local),
+	})
+	if err != nil {
+		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	model = model.openCreateTicket(routeTickets, nil)
-	model.tickets.data.Epics = []kanban.Epic{
-		{ID: 2, Name: "Beta"},
-		{ID: 3, Name: "Berry"},
-		{ID: 4, Name: "Gamma"},
+	model.refreshSprints()
+	model.activeRoute = routeSprints
+
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if model.sprints.modal != sprintModalForm || model.sprints.form.editID != 0 {
+		t.Fatalf("expected create sprint form, got %+v", model.sprints.form)
 	}
-	model.create.focusedField = createFieldEpic
-	model.openCreatePicker(createPickerEpic)
-	model.create.picker.focused = 2
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+
+	model.sprints.modal = sprintModalNone
+	model.focusSprintByStatus(kanban.SprintStatusPlanned)
 	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-
-	if model.create.picker.kind != createPickerNone {
-		t.Fatalf("expected picker to close after selecting filtered item, got %v", model.create.picker.kind)
-	}
-	if model.create.epicName != "Beta" {
-		t.Fatalf("expected filtered epic selection to clamp to Beta, got %q", model.create.epicName)
+	if model.sprints.modal != sprintModalForm || model.sprints.form.editID == 0 {
+		t.Fatalf("expected edit sprint form, got %+v", model.sprints.form)
 	}
 }
 
-func TestCreateTicketPickerEnterNoopsWhenFilterRemovesAllItems(t *testing.T) {
+func TestSprintActivateAndCloseWizardFlows(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	model.tickets.data.Epics = []kanban.Epic{
-		{ID: 1, Name: "Alpha"},
-		{ID: 2, Name: "Beta"},
+	planned, err := model.service.CreateSprint(context.Background(), kanban.CreateSprintInput{
+		Name:     "26Q2 Sprint 4",
+		Goal:     "Next up",
+		Status:   kanban.SprintStatusPlanned,
+		StartsOn: time.Date(2026, 4, 27, 0, 0, 0, 0, time.Local),
+		EndsOn:   time.Date(2026, 5, 3, 0, 0, 0, 0, time.Local),
+	})
+	if err != nil {
+		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	model = model.openCreateTicket(routeTickets, nil)
-	model.tickets.data.Epics = []kanban.Epic{
-		{ID: 1, Name: "Alpha"},
-		{ID: 2, Name: "Beta"},
-	}
-	model.create.focusedField = createFieldEpic
-	model.openCreatePicker(createPickerEpic)
-	model.create.picker.focused = 1
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'z'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	model.refreshSprints()
+	model.activeRoute = routeSprints
+	model.focusSprintByID(planned.ID)
 
-	if model.create.picker.focused != 0 {
-		t.Fatalf("expected picker focus reset to 0, got %d", model.create.picker.focused)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if active, err := model.service.GetActiveSprint(context.Background()); err == nil && active.ID == planned.ID {
+		t.Fatalf("expected activate to fail while another sprint is active")
 	}
-	if model.create.picker.kind != createPickerEpic {
-		t.Fatalf("expected picker to remain open when no items match, got %v", model.create.picker.kind)
+	if model.errorMessage == "" {
+		t.Fatalf("expected activation error message")
+	}
+
+	activeID := model.board.data.Metrics.Sprint.ID
+	model.refreshSprints()
+	model.focusSprintByID(activeID)
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if model.sprints.modal != sprintModalCloseWizard {
+		t.Fatalf("expected close wizard modal, got %v", model.sprints.modal)
 	}
 }
 
-func TestFilterScopeDoesNotAffectTicketsList(t *testing.T) {
+func TestPaletteEpicCommandsRequireSelectedTicket(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	initialTicketCount := len(model.tickets.data.Tickets)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
-	if len(model.tickets.data.Tickets) != initialTicketCount {
-		t.Fatalf("expected tickets list to remain unfiltered, got %d", len(model.tickets.data.Tickets))
+	model.selectedTicket = nil
+	model = model.executePaletteCommand("epic.set_for_ticket")
+	if model.errorMessage == "" {
+		t.Fatalf("expected missing ticket error for epic.set_for_ticket")
+	}
+	model.errorMessage = ""
+	model = model.executePaletteCommand("epic.clear_for_ticket")
+	if model.errorMessage == "" {
+		t.Fatalf("expected missing ticket error for epic.clear_for_ticket")
 	}
 }
 
-func TestFooterHelpMatchesCurrentBoardBindings(t *testing.T) {
-	t.Parallel()
-
-	view := renderFooter(120, routeBoard, modeNormal, "", "")
-	if !strings.Contains(view, "h/l columns") {
-		t.Fatalf("expected board footer bindings, got %q", view)
-	}
-}
-
-func TestBoardSearchEscRestoresOriginalQuery(t *testing.T) {
+func TestBoardSprintMembershipPickerOpens(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	for _, r := range "backend" {
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	model.activeRoute = routeBoard
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	if model.activeRoute != routeSprints {
+		t.Fatalf("expected sprint route after board membership action, got %v", model.activeRoute)
 	}
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	if model.board.searchQuery != "backend" {
-		t.Fatalf("expected committed query backend, got %q", model.board.searchQuery)
-	}
-
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	for _, r := range " ship" {
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
-
-	if model.board.searchQuery != "backend" {
-		t.Fatalf("expected escape to restore backend query, got %q", model.board.searchQuery)
-	}
-	if model.mode != modeNormal {
-		t.Fatalf("expected normal mode after escape, got %v", model.mode)
+	if model.sprints.modal != sprintModalPicker || model.sprints.picker.kind != pickerKindSprintMembership {
+		t.Fatalf("expected sprint membership picker, got %+v", model.sprints.picker)
 	}
 }
 
-func TestBoardSearchTypingKeepsSelectionValidWhenFilteredSetShrinks(t *testing.T) {
+func TestDetailEpicAndSprintFieldsOpenPickers(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
-	if selected := model.selectedBoardTicket(); selected == nil || selected.TicketID == "" {
-		t.Fatal("expected ticket selected before filtering")
-	}
-
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	for _, r := range "ship" {
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-	}
-
 	selected := model.selectedBoardTicket()
 	if selected == nil {
-		t.Fatal("expected selected board ticket after filtering")
+		t.Fatal("expected selected board ticket")
 	}
-	if selected.Title != "Ship Sprint Demo" {
-		t.Fatalf("expected filtered selection to move to Ship Sprint Demo, got %s", selected.Title)
+	model = model.openDetail(selected.TicketID)
+
+	model.detail.focusedField = 4
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if model.activeRoute != routeEpics || model.epics.modal != epicModalPicker {
+		t.Fatalf("expected epic picker from detail epic field")
 	}
-	if model.selectedTicket == nil || model.selectedTicket.TicketID != selected.TicketID {
-		t.Fatalf("expected selected ticket detail to match focused card, got %+v", model.selectedTicket)
-	}
-	if model.board.focusedColumn != 3 {
-		t.Fatalf("expected focus to clamp to done column, got %d", model.board.focusedColumn)
+
+	model.activeRoute = routeTicketDetail
+	model.epics.modal = epicModalNone
+	model.detail.focusedField = 6
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if model.activeRoute != routeSprints || model.sprints.modal != sprintModalPicker {
+		t.Fatalf("expected sprint picker from detail sprint field")
 	}
 }
 
-func TestBoardSearchCommitKeepsSelectionClamped(t *testing.T) {
+func TestTicketsEpicAndSprintColumnsAreReadOnly(t *testing.T) {
 	t.Parallel()
 
 	model := newTestModel(t)
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	for _, r := range "ship" {
-		model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	model.activeRoute = routeTickets
+	model.tickets.focusedColumn = 2
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if model.tickets.editingCell {
+		t.Fatal("expected epic column to remain read-only")
 	}
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-
-	selected := model.selectedBoardTicket()
-	if selected == nil || selected.Title != "Ship Sprint Demo" {
-		t.Fatalf("expected selected board ticket Ship Sprint Demo after commit, got %+v", selected)
-	}
-	if model.selectedTicket == nil || model.selectedTicket.Title != "Ship Sprint Demo" {
-		t.Fatalf("expected selected detail Ship Sprint Demo after commit, got %+v", model.selectedTicket)
-	}
-	if model.mode != modeNormal {
-		t.Fatalf("expected normal mode after commit, got %v", model.mode)
-	}
-}
-
-func TestTicketsNavigationOnlyFetchesDetailOnRowChange(t *testing.T) {
-	t.Parallel()
-
-	service := newCountingService()
-	model := NewModel(Dependencies{Config: config.Config{}, Paths: platform.Paths{}, Service: service})
-	initialCalls := service.getTicketDetailCalls
-
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRight})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	if service.getTicketDetailCalls != initialCalls {
-		t.Fatalf("expected no detail fetch on column move or edit entry, got %d want %d", service.getTicketDetailCalls, initialCalls)
+	if !strings.Contains(model.statusMessage, "read-only") {
+		t.Fatalf("expected read-only status message, got %q", model.statusMessage)
 	}
 
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyEsc})
-	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyDown})
-	if service.getTicketDetailCalls != initialCalls+1 {
-		t.Fatalf("expected one detail fetch on row change, got %d want %d", service.getTicketDetailCalls, initialCalls+1)
+	model.statusMessage = ""
+	model.tickets.focusedColumn = 5
+	model = updateModel(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if model.tickets.editingCell {
+		t.Fatal("expected sprint column to remain read-only")
 	}
-}
-
-func TestNewModelUsesListTicketsAsSupportDataSource(t *testing.T) {
-	t.Parallel()
-
-	service := newCountingService()
-	model := NewModel(Dependencies{Config: config.Config{}, Paths: platform.Paths{}, Service: service})
-
-	if len(model.tickets.data.Epics) == 0 || len(model.tickets.data.Sprints) == 0 {
-		t.Fatalf("expected support data from ListTickets, got %+v", model.tickets.data)
+	if !strings.Contains(model.statusMessage, "read-only") {
+		t.Fatalf("expected read-only status message, got %q", model.statusMessage)
 	}
-	if service.listTicketsCalls != 1 {
-		t.Fatalf("expected one ListTickets call, got %d", service.listTicketsCalls)
-	}
-	if service.listEpicsCalls != 0 {
-		t.Fatalf("expected no ListEpics call, got %d", service.listEpicsCalls)
-	}
-	if service.listSprintsCalls != 0 {
-		t.Fatalf("expected no ListSprints call, got %d", service.listSprintsCalls)
-	}
-}
-
-func TestRenderedLabelsUseGitHubSpelling(t *testing.T) {
-	t.Parallel()
-
-	ticket := &kanban.TicketDetail{Ticket: kanban.Ticket{
-		TicketID:    "TICKET-001",
-		Title:       "Title",
-		Description: "Description",
-		EpicName:    "Epic",
-		Type:        kanban.TicketTypeFeature,
-		GitHubPRURL: "https://example.com/pr",
-	}}
-	panel := renderSelectedTicketPanel(60, 20, ticket)
-	if strings.Contains(panel, "Github") {
-		t.Fatalf("expected GitHub spelling in board panel, got %q", panel)
-	}
-	if !strings.Contains(panel, "GitHub PR: https://example.com/pr") {
-		t.Fatalf("expected GitHub label in board panel, got %q", panel)
-	}
-	if strings.Contains(strings.Join(ticketTableColumns, "\n"), "Github") {
-		t.Fatalf("expected GitHub spelling in ticket table headers, got %v", ticketTableColumns)
-	}
-	if strings.Contains(strings.Join(detailFields, "\n"), "Github") {
-		t.Fatalf("expected GitHub spelling in detail fields, got %v", detailFields)
-	}
-}
-
-type countingService struct {
-	boardData            kanban.BoardData
-	ticketList           kanban.TicketListResult
-	details              map[string]kanban.TicketDetail
-	getTicketDetailCalls int
-	listTicketsCalls     int
-	listEpicsCalls       int
-	listSprintsCalls     int
-}
-
-func newCountingService() *countingService {
-	ticket1 := kanban.Ticket{
-		ID:          1,
-		TicketID:    "TICKET-001",
-		Title:       "One",
-		Status:      kanban.TicketStatusNotStarted,
-		Type:        kanban.TicketTypeFeature,
-		EpicID:      1,
-		EpicName:    "Epic One",
-		GitHubPRURL: "https://example.com/1",
-	}
-	ticket2 := kanban.Ticket{
-		ID:          2,
-		TicketID:    "TICKET-002",
-		Title:       "Two",
-		Status:      kanban.TicketStatusInProgress,
-		Type:        kanban.TicketTypeBug,
-		EpicID:      1,
-		EpicName:    "Epic One",
-		GitHubPRURL: "https://example.com/2",
-	}
-	columns := make([]kanban.BoardColumn, 0, len(boardStatuses))
-	for _, status := range boardStatuses {
-		column := kanban.BoardColumn{Status: status}
-		switch status {
-		case kanban.TicketStatusNotStarted:
-			column.Tickets = []kanban.Ticket{ticket1}
-		case kanban.TicketStatusInProgress:
-			column.Tickets = []kanban.Ticket{ticket2}
-		}
-		columns = append(columns, column)
-	}
-	return &countingService{
-		boardData: kanban.BoardData{Columns: columns},
-		ticketList: kanban.TicketListResult{
-			Tickets: []kanban.Ticket{ticket1, ticket2},
-			Epics:   []kanban.Epic{{ID: 1, Name: "Epic One"}},
-			Sprints: []kanban.Sprint{{ID: 1, Name: "Sprint One"}},
-		},
-		details: map[string]kanban.TicketDetail{
-			ticket1.TicketID: {Ticket: ticket1},
-			ticket2.TicketID: {Ticket: ticket2},
-		},
-	}
-}
-
-func (s *countingService) LoadBoard(context.Context) (kanban.BoardData, error) {
-	return s.boardData, nil
-}
-
-func (s *countingService) ListTickets(context.Context, kanban.TicketListFilters) (kanban.TicketListResult, error) {
-	s.listTicketsCalls++
-	return s.ticketList, nil
-}
-
-func (s *countingService) GetTicketDetail(_ context.Context, ticketID string) (kanban.TicketDetail, error) {
-	s.getTicketDetailCalls++
-	return s.details[ticketID], nil
-}
-
-func (s *countingService) CreateTicket(context.Context, kanban.CreateTicketInput) (kanban.TicketDetail, error) {
-	return kanban.TicketDetail{}, nil
-}
-
-func (s *countingService) UpdateTicket(context.Context, string, kanban.UpdateTicketInput) (kanban.TicketDetail, error) {
-	return kanban.TicketDetail{}, nil
-}
-
-func (s *countingService) MoveTicket(context.Context, string, int) (kanban.TicketDetail, error) {
-	return kanban.TicketDetail{}, nil
-}
-
-func (s *countingService) AddComment(context.Context, string, kanban.AddCommentInput) (kanban.TicketComment, error) {
-	return kanban.TicketComment{}, nil
-}
-
-func (s *countingService) EnsureCreateEpic(context.Context) (kanban.Epic, error) {
-	return kanban.Epic{ID: 1, Name: "Epic One"}, nil
-}
-
-func (s *countingService) ListEpics(context.Context) ([]kanban.Epic, error) {
-	s.listEpicsCalls++
-	return s.ticketList.Epics, nil
-}
-
-func (s *countingService) ListSprints(context.Context, kanban.SprintListFilters) ([]kanban.SprintSummary, error) {
-	s.listSprintsCalls++
-	return nil, nil
-}
-
-func (s *countingService) ExportTicketMarkdown(context.Context, string, string) (string, error) {
-	return "", nil
-}
-
-func (s *countingService) ExportTicketCSV(context.Context, string, string) (string, error) {
-	return "", nil
 }

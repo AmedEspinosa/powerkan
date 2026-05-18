@@ -77,6 +77,15 @@ func (m Model) handleBoardNormalKey(msg tea.KeyMsg) Model {
 		} else {
 			m.statusMessage = "Board filter cleared"
 		}
+	case msg.String() == "b":
+		if m.board.filter.scope == kanban.BoardScopeSprint {
+			m.board.filter.scope = kanban.BoardScopeBacklog
+			m.statusMessage = "Board scope: backlog"
+		} else {
+			m.board.filter.scope = kanban.BoardScopeSprint
+			m.statusMessage = "Board scope: sprint"
+		}
+		m.refreshBoard(m.currentSelectedTicketID())
 	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
 		if selected := m.selectedBoardTicket(); selected != nil {
 			return m.openDetail(selected.TicketID)
@@ -87,6 +96,11 @@ func (m Model) handleBoardNormalKey(msg tea.KeyMsg) Model {
 			sprintID = &m.board.data.Metrics.Sprint.ID
 		}
 		return m.openCreateTicket(routeBoard, sprintID)
+	case msg.String() == "m":
+		if selected := m.selectedBoardTicket(); selected != nil {
+			m.activeRoute = routeSprints
+			m.openSprintMembershipPicker(selected.TicketID)
+		}
 	}
 	return m
 }

@@ -58,6 +58,10 @@ func (m Model) handleTicketsNormalKey(msg tea.KeyMsg) Model {
 		}
 	case msg.String() == "i" || msg.String() == "e":
 		if selected := m.selectedTableTicket(); selected != nil && m.tickets.focusedColumn > 0 {
+			if m.tickets.focusedColumn == 2 || m.tickets.focusedColumn == 5 {
+				m.statusMessage = "Epic and Sprint are read-only here. Use ticket detail, board m, or : palette."
+				return m
+			}
 			m.mode = modeInsert
 			m.tickets.editingCell = true
 			m.tickets.originalValue = ticketCellValue(*selected, m.tickets.focusedColumn)
@@ -127,13 +131,6 @@ func (m Model) commitTableEdit() Model {
 	switch m.tickets.focusedColumn {
 	case 1:
 		input.Title = value
-	case 2:
-		epicID, err := m.lookupEpicID(value)
-		if err != nil {
-			m.errorMessage = err.Error()
-			return m
-		}
-		input.EpicID = epicID
 	case 3:
 		tt, err := parseTicketType(value)
 		if err != nil {
@@ -148,13 +145,6 @@ func (m Model) commitTableEdit() Model {
 			return m
 		}
 		input.StoryPoints = points
-	case 5:
-		sprintID, err := m.lookupSprintID(value)
-		if err != nil {
-			m.errorMessage = err.Error()
-			return m
-		}
-		input.SprintID = sprintID
 	case 6:
 		blocked, err := parseBool(value)
 		if err != nil {
@@ -194,11 +184,34 @@ func (m Model) handleDetailNormalKey(msg tea.KeyMsg) Model {
 		}
 	case msg.String() == "i" || msg.String() == "e":
 		if m.selectedTicket != nil {
+			if m.detail.focusedField == 4 {
+				m.activeRoute = routeEpics
+				m.refreshEpics()
+				m.openEpicAssignmentPicker(m.selectedTicket.TicketID, true)
+				return m
+			}
+			if m.detail.focusedField == 6 {
+				m.activeRoute = routeSprints
+				m.openSprintMembershipPicker(m.selectedTicket.TicketID)
+				return m
+			}
 			m.mode = modeInsert
 			m.detail.editingField = true
 			m.detail.originalValue = detailFieldValue(m.detail.ticket, m.detail.focusedField)
 			m.detail.editingValue = m.detail.originalValue
 			m.statusMessage = "Editing detail field"
+		}
+	case msg.String() == "enter" || msg.Type == tea.KeyEnter:
+		if m.selectedTicket != nil && (m.detail.focusedField == 4 || m.detail.focusedField == 6) {
+			if m.detail.focusedField == 4 {
+				m.activeRoute = routeEpics
+				m.refreshEpics()
+				m.openEpicAssignmentPicker(m.selectedTicket.TicketID, true)
+			} else {
+				m.activeRoute = routeSprints
+				m.openSprintMembershipPicker(m.selectedTicket.TicketID)
+			}
+			return m
 		}
 	case msg.String() == "esc" || msg.Type == tea.KeyEsc:
 		m.activeRoute = m.previousRoute
@@ -284,13 +297,6 @@ func (m Model) commitDetailEdit() Model {
 			return m
 		}
 		input.Status = status
-	case 4:
-		epicID, err := m.lookupEpicID(value)
-		if err != nil {
-			m.errorMessage = err.Error()
-			return m
-		}
-		input.EpicID = epicID
 	case 5:
 		tt, err := parseTicketType(value)
 		if err != nil {
@@ -298,13 +304,6 @@ func (m Model) commitDetailEdit() Model {
 			return m
 		}
 		input.Type = tt
-	case 6:
-		sprintID, err := m.lookupSprintID(value)
-		if err != nil {
-			m.errorMessage = err.Error()
-			return m
-		}
-		input.SprintID = sprintID
 	case 7:
 		blocked, err := parseBool(value)
 		if err != nil {

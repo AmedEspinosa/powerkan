@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"os"
@@ -27,6 +28,7 @@ var (
 	ErrEpicInUse            = errors.New("epic is referenced by existing tickets")
 	ErrSprintInUse          = errors.New("sprint is referenced by existing tickets")
 	ErrWebhookNotConfigured = errors.New("webhook endpoint_url is not configured")
+	ErrActiveSprintExists   = errors.New("an active sprint already exists")
 )
 
 const DefaultEpicName = "Inbox"
@@ -56,27 +58,39 @@ func (s *Service) SetHTTPClient(client *http.Client) {
 }
 
 func (s *Service) LoadBoard(ctx context.Context) (BoardData, error) {
+	scope := BoardScopeBacklog
+	if sprint, err := s.GetActiveSprint(ctx); err == nil && sprint != nil {
+		scope = BoardScopeSprint
+	}
+	return s.LoadBoardWithScope(ctx, scope)
+}
+
+func (s *Service) LoadBoardWithScope(ctx context.Context, scope BoardScope) (BoardData, error) {
 	board := BoardData{Columns: make([]BoardColumn, 0, len(TicketStatuses))}
 	for _, status := range TicketStatuses {
 		board.Columns = append(board.Columns, BoardColumn{Status: status})
 	}
 
-	sprint, err := s.GetActiveSprint(ctx)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return board, nil
-		}
+	activeSprint, err := s.GetActiveSprint(ctx)
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		return BoardData{}, err
 	}
 
-	tickets, err := s.listTicketsForSprint(ctx, &sprint.ID)
+	filters := TicketListFilters{}
+	if scope == BoardScopeSprint && activeSprint != nil {
+		filters.SprintID = &activeSprint.ID
+	} else {
+		scope = BoardScopeBacklog
+		filters.Backlog = true
+	}
+
+	tickets, err := s.ListTickets(ctx, filters)
 	if err != nil {
 		return BoardData{}, err
 	}
-
 	totalPoints := 0.0
 	donePoints := 0.0
-	for _, ticket := range tickets {
+	for _, ticket := range tickets.Tickets {
 		totalPoints += ticket.StoryPoints
 		if ticket.Status == TicketStatusDone {
 			donePoints += ticket.StoryPoints
@@ -84,38 +98,40 @@ func (s *Service) LoadBoard(ctx context.Context) (BoardData, error) {
 		for i := range board.Columns {
 			if board.Columns[i].Status == ticket.Status {
 				board.Columns[i].Tickets = append(board.Columns[i].Tickets, ticket)
+				break
 			}
 		}
 	}
 
-	location, err := s.location()
-	if err != nil {
-		return BoardData{}, err
-	}
-	startDate := dateInLocation(sprint.StartDate, location)
-	endDate := dateInLocation(sprint.EndDate, location)
-	durationDays := inclusiveDays(startDate, endDate)
 	metrics := BoardMetrics{
-		Sprint:           sprint,
-		DaysLeft:         max(0, inclusiveDays(truncateDate(s.now().In(location)), endDate)),
+		Sprint:           activeSprint,
 		PercentCompleted: ratio(donePoints, totalPoints),
-		PointsPerDay:     divide(totalPoints, durationDays),
 		TotalPoints:      totalPoints,
 		DonePoints:       donePoints,
+		Scope:            scope,
+	}
+	if activeSprint != nil {
+		location, err := s.location()
+		if err != nil {
+			return BoardData{}, err
+		}
+		endDate := dateInLocation(activeSprint.EndsOn, location)
+		durationDays := inclusiveDays(dateInLocation(activeSprint.StartsOn, location), endDate)
+		metrics.DaysLeft = max(0, inclusiveDays(truncateDate(s.now().In(location)), endDate))
+		metrics.PointsPerDay = divide(totalPoints, durationDays)
 	}
 	board.Metrics = metrics
-
 	return board, nil
 }
 
 func (s *Service) ListTickets(ctx context.Context, filters TicketListFilters) (TicketListResult, error) {
 	where := make([]string, 0, 4)
 	args := make([]any, 0, 4)
-	switch {
-	case filters.Backlog:
-		where = append(where, "t.sprint_id IS NULL")
-	case filters.SprintID != nil:
-		where = append(where, "t.sprint_id = ?")
+	if filters.Backlog {
+		where = append(where, "cur.sprint_id IS NULL")
+	}
+	if filters.SprintID != nil {
+		where = append(where, "cur.sprint_id = ?")
 		args = append(args, *filters.SprintID)
 	}
 	if filters.EpicID != nil {
@@ -127,16 +143,11 @@ func (s *Service) ListTickets(ctx context.Context, filters TicketListFilters) (T
 		args = append(args, string(*filters.Status))
 	}
 
-	query := `SELECT t.id, t.ticket_id, t.title, t.status, t.type, t.blocked, t.story_points,
-		t.epic_id, e.name, t.sprint_id, COALESCE(s.name, ''), COALESCE(t.github_pr_url, ''),
-		COALESCE(t.description, ''), COALESCE(t.position, 0), t.created_at, t.updated_at
-	FROM tickets t
-	INNER JOIN epics e ON e.id = t.epic_id
-	LEFT JOIN sprints s ON s.id = t.sprint_id`
+	query := ticketSelectQuery()
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
-	query += " ORDER BY CASE t.status WHEN 'NOT_STARTED' THEN 1 WHEN 'IN_PROGRESS' THEN 2 WHEN 'UNDER_REVIEW' THEN 3 ELSE 4 END, COALESCE(t.position, 0), t.updated_at DESC, t.id DESC"
+	query += ticketOrderClause()
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -151,6 +162,11 @@ func (s *Service) ListTickets(ctx context.Context, filters TicketListFilters) (T
 		if err != nil {
 			return TicketListResult{}, err
 		}
+		history, err := s.listSprintHistory(ctx, ticket.ID)
+		if err != nil {
+			return TicketListResult{}, err
+		}
+		ticket.SprintHistory = history
 		tickets = append(tickets, ticket)
 		totalPoints += ticket.StoryPoints
 	}
@@ -182,13 +198,7 @@ func (s *Service) ListTickets(ctx context.Context, filters TicketListFilters) (T
 }
 
 func (s *Service) GetTicketDetail(ctx context.Context, ticketID string) (TicketDetail, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT t.id, t.ticket_id, t.title, t.status, t.type, t.blocked, t.story_points,
-		t.epic_id, e.name, t.sprint_id, COALESCE(sp.name, ''), COALESCE(t.github_pr_url, ''),
-		COALESCE(t.description, ''), COALESCE(t.position, 0), t.created_at, t.updated_at
-	FROM tickets t
-	INNER JOIN epics e ON e.id = t.epic_id
-	LEFT JOIN sprints sp ON sp.id = t.sprint_id
-	WHERE t.ticket_id = ?`, ticketID)
+	row := s.db.QueryRowContext(ctx, ticketSelectQuery()+" WHERE t.ticket_id = ?", ticketID)
 	ticket, err := scanTicket(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -196,22 +206,35 @@ func (s *Service) GetTicketDetail(ctx context.Context, ticketID string) (TicketD
 		}
 		return TicketDetail{}, err
 	}
-
+	ticket.SprintHistory, err = s.listSprintHistory(ctx, ticket.ID)
+	if err != nil {
+		return TicketDetail{}, err
+	}
 	comments, err := s.listCommentsByTicketInternalID(ctx, ticket.ID)
 	if err != nil {
 		return TicketDetail{}, err
 	}
-
 	return TicketDetail{Ticket: ticket, Comments: comments}, nil
 }
 
 func (s *Service) CreateEpic(ctx context.Context, input CreateEpicInput) (Epic, error) {
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		return Epic{}, fmt.Errorf("epic name is required")
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		title = strings.TrimSpace(input.Name)
+	}
+	if title == "" {
+		return Epic{}, fmt.Errorf("epic title is required")
+	}
+	status := input.Status
+	if status == "" {
+		status = EpicStatusOpen
+	}
+	if !isValidEpicStatus(status) {
+		return Epic{}, fmt.Errorf("invalid epic status %q", status)
 	}
 	now := s.now().UTC()
-	result, err := s.db.ExecContext(ctx, `INSERT INTO epics(name, created_at) VALUES(?, ?)`, name, now.Format(time.RFC3339))
+	result, err := s.db.ExecContext(ctx, `INSERT INTO epics(title, status, color, created_at, updated_at) VALUES(?, ?, ?, ?, ?)`,
+		title, string(status), nullableColor(input.Color), now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return Epic{}, err
 	}
@@ -219,24 +242,56 @@ func (s *Service) CreateEpic(ctx context.Context, input CreateEpicInput) (Epic, 
 	if err != nil {
 		return Epic{}, err
 	}
-	return Epic{ID: id, Name: name, CreatedAt: now}, nil
+	return s.GetEpic(ctx, id)
+}
+
+func (s *Service) UpdateEpic(ctx context.Context, id int64, input UpdateEpicInput) (Epic, error) {
+	title := strings.TrimSpace(input.Title)
+	if title == "" {
+		title = strings.TrimSpace(input.Name)
+	}
+	if title == "" {
+		return Epic{}, fmt.Errorf("epic title is required")
+	}
+	if !isValidEpicStatus(input.Status) {
+		return Epic{}, fmt.Errorf("invalid epic status %q", input.Status)
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE epics SET title = ?, status = ?, color = ?, updated_at = ? WHERE id = ?`,
+		title, string(input.Status), nullableColor(input.Color), s.now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return Epic{}, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return Epic{}, err
+	}
+	if rowsAffected == 0 {
+		return Epic{}, ErrNotFound
+	}
+	return s.GetEpic(ctx, id)
+}
+
+func (s *Service) GetEpic(ctx context.Context, id int64) (Epic, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT id, title, status, color, created_at, updated_at FROM epics WHERE id = ?`, id)
+	epic, err := scanEpic(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Epic{}, ErrNotFound
+		}
+		return Epic{}, err
+	}
+	return epic, nil
 }
 
 func (s *Service) ListEpics(ctx context.Context) ([]Epic, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, created_at FROM epics ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, title, status, color, created_at, updated_at FROM epics ORDER BY CASE status WHEN 'open' THEN 0 ELSE 1 END, title`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var epics []Epic
 	for rows.Next() {
-		var epic Epic
-		var createdAt string
-		if err := rows.Scan(&epic.ID, &epic.Name, &createdAt); err != nil {
-			return nil, err
-		}
-		epic.CreatedAt, err = parseTimestamp(createdAt)
+		epic, err := scanEpic(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -250,25 +305,13 @@ func (s *Service) EnsureCreateEpic(ctx context.Context) (Epic, error) {
 	if err != nil {
 		return Epic{}, err
 	}
-	if len(epics) == 0 {
-		return s.CreateEpic(ctx, CreateEpicInput{Name: DefaultEpicName})
+	if len(epics) > 0 {
+		return epics[0], nil
 	}
-	for _, epic := range epics {
-		if strings.EqualFold(epic.Name, DefaultEpicName) {
-			return epic, nil
-		}
-	}
-	return epics[0], nil
+	return s.CreateEpic(ctx, CreateEpicInput{Title: DefaultEpicName, Status: EpicStatusOpen})
 }
 
 func (s *Service) DeleteEpic(ctx context.Context, id int64) error {
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM tickets WHERE epic_id = ?`, id).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return ErrEpicInUse
-	}
 	result, err := s.db.ExecContext(ctx, `DELETE FROM epics WHERE id = ?`, id)
 	if err != nil {
 		return err
@@ -283,16 +326,60 @@ func (s *Service) DeleteEpic(ctx context.Context, id int64) error {
 	return nil
 }
 
+func (s *Service) AssignEpicToTicket(ctx context.Context, ticketID string, epicID int64) (TicketDetail, error) {
+	detail, err := s.GetTicketDetail(ctx, ticketID)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	input := ticketToUpdateInput(detail.Ticket)
+	input.EpicID = &epicID
+	return s.UpdateTicket(ctx, ticketID, input)
+}
+
+func (s *Service) ClearEpicForTicket(ctx context.Context, ticketID string) (TicketDetail, error) {
+	detail, err := s.GetTicketDetail(ctx, ticketID)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	input := ticketToUpdateInput(detail.Ticket)
+	input.EpicID = nil
+	return s.UpdateTicket(ctx, ticketID, input)
+}
+
 func (s *Service) CreateSprint(ctx context.Context, input CreateSprintInput) (Sprint, error) {
-	if err := validateSprintDates(input.StartDate, input.EndDate); err != nil {
+	if input.StartsOn.IsZero() {
+		input.StartsOn = input.StartDate
+	}
+	if input.EndsOn.IsZero() {
+		input.EndsOn = input.EndDate
+	}
+	if err := validateSprintDates(input.StartsOn, input.EndsOn); err != nil {
 		return Sprint{}, err
 	}
-	if err := s.ensureSprintNoOverlap(ctx, 0, input.StartDate, input.EndDate); err != nil {
-		return Sprint{}, err
+	if input.Status == "" {
+		input.Status = SprintStatusPlanned
+	}
+	if !isValidSprintStatus(input.Status) {
+		return Sprint{}, fmt.Errorf("invalid sprint status %q", input.Status)
 	}
 	now := s.now().UTC()
-	result, err := s.db.ExecContext(ctx, `INSERT INTO sprints(name, quarter, start_date, end_date, created_at) VALUES(?, ?, ?, ?, ?)`,
-		strings.TrimSpace(input.Name), strings.TrimSpace(input.Quarter), input.StartDate.Format("2006-01-02"), input.EndDate.Format("2006-01-02"), now.Format(time.RFC3339))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Sprint{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if input.Status == SprintStatusActive {
+		if err := s.ensureNoOtherActiveSprint(ctx, tx, 0); err != nil {
+			return Sprint{}, err
+		}
+	}
+
+	result, err := tx.ExecContext(ctx, `INSERT INTO sprints(name, goal, status, starts_on, ends_on, created_at, updated_at, closed_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, NULL)`,
+		strings.TrimSpace(input.Name), strings.TrimSpace(input.Goal), string(input.Status),
+		truncateDate(input.StartsOn).Format("2006-01-02"), truncateDate(input.EndsOn).Format("2006-01-02"),
+		now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return Sprint{}, err
 	}
@@ -300,27 +387,48 @@ func (s *Service) CreateSprint(ctx context.Context, input CreateSprintInput) (Sp
 	if err != nil {
 		return Sprint{}, err
 	}
-	sprint := Sprint{
-		ID:        id,
-		Name:      strings.TrimSpace(input.Name),
-		Quarter:   strings.TrimSpace(input.Quarter),
-		StartDate: truncateDate(input.StartDate),
-		EndDate:   truncateDate(input.EndDate),
-		CreatedAt: now,
+	if err := tx.Commit(); err != nil {
+		return Sprint{}, err
 	}
-	sprint.Status, _ = s.deriveSprintStatus(sprint)
-	return sprint, nil
+	return s.GetSprint(ctx, id)
 }
 
 func (s *Service) UpdateSprint(ctx context.Context, id int64, input UpdateSprintInput) (Sprint, error) {
-	if err := validateSprintDates(input.StartDate, input.EndDate); err != nil {
+	if input.StartsOn.IsZero() {
+		input.StartsOn = input.StartDate
+	}
+	if input.EndsOn.IsZero() {
+		input.EndsOn = input.EndDate
+	}
+	if err := validateSprintDates(input.StartsOn, input.EndsOn); err != nil {
 		return Sprint{}, err
 	}
-	if err := s.ensureSprintNoOverlap(ctx, id, input.StartDate, input.EndDate); err != nil {
+	if !isValidSprintStatus(input.Status) {
+		return Sprint{}, fmt.Errorf("invalid sprint status %q", input.Status)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return Sprint{}, err
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE sprints SET name = ?, quarter = ?, start_date = ?, end_date = ? WHERE id = ?`,
-		strings.TrimSpace(input.Name), strings.TrimSpace(input.Quarter), input.StartDate.Format("2006-01-02"), input.EndDate.Format("2006-01-02"), id)
+	defer func() { _ = tx.Rollback() }()
+
+	if input.Status == SprintStatusActive {
+		if err := s.ensureNoOtherActiveSprint(ctx, tx, id); err != nil {
+			return Sprint{}, err
+		}
+	}
+
+	var closedAt any
+	if input.Status == SprintStatusClosed {
+		closedAt = s.now().UTC().Format(time.RFC3339)
+	}
+
+	result, err := tx.ExecContext(ctx, `UPDATE sprints
+		SET name = ?, goal = ?, status = ?, starts_on = ?, ends_on = ?, updated_at = ?, closed_at = COALESCE(?, closed_at)
+		WHERE id = ?`,
+		strings.TrimSpace(input.Name), strings.TrimSpace(input.Goal), string(input.Status),
+		truncateDate(input.StartsOn).Format("2006-01-02"), truncateDate(input.EndsOn).Format("2006-01-02"),
+		s.now().UTC().Format(time.RFC3339), closedAt, id)
 	if err != nil {
 		return Sprint{}, err
 	}
@@ -331,33 +439,14 @@ func (s *Service) UpdateSprint(ctx context.Context, id int64, input UpdateSprint
 	if rowsAffected == 0 {
 		return Sprint{}, ErrNotFound
 	}
+	if err := tx.Commit(); err != nil {
+		return Sprint{}, err
+	}
 	return s.GetSprint(ctx, id)
 }
 
-func (s *Service) DeleteSprint(ctx context.Context, id int64) error {
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM tickets WHERE sprint_id = ?`, id).Scan(&count); err != nil {
-		return err
-	}
-	if count > 0 {
-		return ErrSprintInUse
-	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM sprints WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rowsAffected == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
 func (s *Service) GetSprint(ctx context.Context, id int64) (Sprint, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, name, quarter, start_date, end_date, created_at, completed_at FROM sprints WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, goal, status, starts_on, ends_on, created_at, updated_at, closed_at FROM sprints WHERE id = ?`, id)
 	sprint, err := scanSprint(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -365,12 +454,19 @@ func (s *Service) GetSprint(ctx context.Context, id int64) (Sprint, error) {
 		}
 		return Sprint{}, err
 	}
-	sprint.Status, _ = s.deriveSprintStatus(sprint)
 	return sprint, nil
 }
 
 func (s *Service) ListSprints(ctx context.Context, filters SprintListFilters) ([]SprintSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, quarter, start_date, end_date, created_at, completed_at FROM sprints ORDER BY start_date DESC, id DESC`)
+	query := `SELECT id, name, goal, status, starts_on, ends_on, created_at, updated_at, closed_at FROM sprints`
+	args := []any{}
+	if filters.Status != nil {
+		query += ` WHERE status = ?`
+		args = append(args, string(*filters.Status))
+	}
+	query += ` ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'planned' THEN 1 ELSE 2 END, starts_on DESC, id DESC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -382,22 +478,15 @@ func (s *Service) ListSprints(ctx context.Context, filters SprintListFilters) ([
 		if err != nil {
 			return nil, err
 		}
-		status, err := s.deriveSprintStatus(sprint)
-		if err != nil {
-			return nil, err
-		}
-		sprint.Status = status
-		if filters.Quarter != nil && sprint.Quarter != *filters.Quarter {
-			continue
-		}
-		if filters.Status != nil && sprint.Status != *filters.Status {
-			continue
-		}
-
 		var totalPoints, pointsCompleted float64
 		var ticketCount int
-		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(story_points), 0), COALESCE(SUM(CASE WHEN status = 'DONE' THEN story_points ELSE 0 END), 0), COUNT(1)
-			FROM tickets WHERE sprint_id = ?`, sprint.ID).Scan(&totalPoints, &pointsCompleted, &ticketCount); err != nil {
+		if err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(t.story_points), 0),
+	COALESCE(SUM(CASE WHEN t.status = 'DONE' THEN t.story_points ELSE 0 END), 0),
+	COUNT(1)
+FROM sprint_tickets st
+INNER JOIN tickets t ON t.id = st.ticket_id
+WHERE st.sprint_id = ?`, sprint.ID).Scan(&totalPoints, &pointsCompleted, &ticketCount); err != nil {
 			return nil, err
 		}
 		summaries = append(summaries, SprintSummary{
@@ -412,40 +501,205 @@ func (s *Service) ListSprints(ctx context.Context, filters SprintListFilters) ([
 }
 
 func (s *Service) GetActiveSprint(ctx context.Context) (*Sprint, error) {
-	location, err := s.location()
+	row := s.db.QueryRowContext(ctx, `SELECT id, name, goal, status, starts_on, ends_on, created_at, updated_at, closed_at FROM sprints WHERE status = 'active' LIMIT 1`)
+	sprint, err := scanSprint(row)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
 		return nil, err
 	}
-	today := truncateDate(s.now().In(location)).Format("2006-01-02")
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, quarter, start_date, end_date, created_at, completed_at
-		FROM sprints WHERE start_date <= ? AND end_date >= ? ORDER BY start_date DESC, id DESC`, today, today)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+	return &sprint, nil
+}
 
-	var active *Sprint
-	for rows.Next() {
-		sprint, err := scanSprint(rows)
-		if err != nil {
-			return nil, err
-		}
-		status, err := s.deriveSprintStatus(sprint)
-		if err != nil {
-			return nil, err
-		}
-		sprint.Status = status
-		if active == nil {
-			copy := sprint
-			active = &copy
-			continue
-		}
-		return nil, fmt.Errorf("%w: %d and %d", ErrSprintOverlap, active.ID, sprint.ID)
+func (s *Service) ActivateSprint(ctx context.Context, id int64) (Sprint, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Sprint{}, err
 	}
-	if active == nil {
-		return nil, ErrNotFound
+	defer func() { _ = tx.Rollback() }()
+
+	if err := s.ensureNoOtherActiveSprint(ctx, tx, id); err != nil {
+		return Sprint{}, err
 	}
-	return active, nil
+	result, err := tx.ExecContext(ctx, `UPDATE sprints SET status = 'active', updated_at = ? WHERE id = ? AND status != 'closed'`,
+		s.now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return Sprint{}, err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return Sprint{}, err
+	}
+	if rowsAffected == 0 {
+		return Sprint{}, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return Sprint{}, err
+	}
+	return s.GetSprint(ctx, id)
+}
+
+func (s *Service) ListIncompleteSprintTickets(ctx context.Context, sprintID int64) ([]Ticket, error) {
+	filters := TicketListFilters{SprintID: &sprintID}
+	result, err := s.ListTickets(ctx, filters)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Ticket, 0, len(result.Tickets))
+	for _, ticket := range result.Tickets {
+		if ticket.Status != TicketStatusDone {
+			out = append(out, ticket)
+		}
+	}
+	return out, nil
+}
+
+func (s *Service) CloseSprint(ctx context.Context, id int64, input CloseSprintInput) (Sprint, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Sprint{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var current Sprint
+	row := tx.QueryRowContext(ctx, `SELECT id, name, goal, status, starts_on, ends_on, created_at, updated_at, closed_at FROM sprints WHERE id = ?`, id)
+	current, err = scanSprint(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Sprint{}, ErrNotFound
+		}
+		return Sprint{}, err
+	}
+	if current.Status != SprintStatusActive {
+		return Sprint{}, fmt.Errorf("sprint %d is not active", id)
+	}
+
+	var nextSprintID int64
+	switch {
+	case input.NextSprintID != nil:
+		nextSprintID = *input.NextSprintID
+	case input.CreateNextSprint != nil:
+		if input.CreateNextSprint.StartsOn.IsZero() {
+			input.CreateNextSprint.StartsOn = input.CreateNextSprint.StartDate
+		}
+		if input.CreateNextSprint.EndsOn.IsZero() {
+			input.CreateNextSprint.EndsOn = input.CreateNextSprint.EndDate
+		}
+		if err := validateSprintDates(input.CreateNextSprint.StartsOn, input.CreateNextSprint.EndsOn); err != nil {
+			return Sprint{}, err
+		}
+		create := *input.CreateNextSprint
+		create.Status = SprintStatusPlanned
+		result, err := tx.ExecContext(ctx, `INSERT INTO sprints(name, goal, status, starts_on, ends_on, created_at, updated_at, closed_at)
+			VALUES(?, ?, 'planned', ?, ?, ?, ?, NULL)`,
+			strings.TrimSpace(create.Name), strings.TrimSpace(create.Goal),
+			truncateDate(create.StartsOn).Format("2006-01-02"), truncateDate(create.EndsOn).Format("2006-01-02"),
+			s.now().UTC().Format(time.RFC3339), s.now().UTC().Format(time.RFC3339))
+		if err != nil {
+			return Sprint{}, err
+		}
+		nextSprintID, err = result.LastInsertId()
+		if err != nil {
+			return Sprint{}, err
+		}
+	default:
+		return Sprint{}, fmt.Errorf("close sprint requires a next sprint")
+	}
+
+	var otherActive int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE status = 'active' AND id NOT IN (?, ?)`, id, nextSprintID).Scan(&otherActive); err != nil {
+		return Sprint{}, err
+	}
+	if otherActive > 0 {
+		return Sprint{}, ErrActiveSprintExists
+	}
+
+	closedAt := s.now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx, `UPDATE sprints SET status = 'closed', closed_at = ?, updated_at = ? WHERE id = ?`, closedAt, closedAt, id); err != nil {
+		return Sprint{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sprint_tickets SET removed_at = ? WHERE sprint_id = ? AND removed_at IS NULL`, closedAt, id); err != nil {
+		return Sprint{}, err
+	}
+	for _, ticketID := range input.CarryOverTicketIDs {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO sprint_tickets (sprint_id, ticket_id, added_at, removed_at)
+SELECT ?, id, ?, NULL FROM tickets WHERE ticket_id = ?`, nextSprintID, closedAt, ticketID); err != nil {
+			return Sprint{}, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sprints SET status = 'active', updated_at = ? WHERE id = ?`, closedAt, nextSprintID); err != nil {
+		return Sprint{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Sprint{}, err
+	}
+	return s.GetSprint(ctx, id)
+}
+
+func (s *Service) AddTicketToActiveSprint(ctx context.Context, ticketID string) (TicketDetail, error) {
+	active, err := s.GetActiveSprint(ctx)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	internalID, err := s.lookupTicketInternalID(ctx, tx, ticketID)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE sprint_tickets SET removed_at = ? WHERE ticket_id = ? AND removed_at IS NULL`, s.now().UTC().Format(time.RFC3339), internalID); err != nil {
+		return TicketDetail{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sprint_tickets(sprint_id, ticket_id, added_at, removed_at) VALUES(?, ?, ?, NULL)`,
+		active.ID, internalID, s.now().UTC().Format(time.RFC3339)); err != nil {
+		return TicketDetail{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET updated_at = ? WHERE id = ?`, s.now().UTC().Format(time.RFC3339), internalID); err != nil {
+		return TicketDetail{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TicketDetail{}, err
+	}
+	detail, err := s.GetTicketDetail(ctx, ticketID)
+	if err == nil {
+		s.postTicketWebhookBestEffort(ctx, "ticket.updated", detail)
+	}
+	return detail, err
+}
+
+func (s *Service) RemoveTicketFromActiveSprint(ctx context.Context, ticketID string) (TicketDetail, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	internalID, err := s.lookupTicketInternalID(ctx, tx, ticketID)
+	if err != nil {
+		return TicketDetail{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sprint_tickets SET removed_at = ? WHERE ticket_id = ? AND removed_at IS NULL`,
+		s.now().UTC().Format(time.RFC3339), internalID); err != nil {
+		return TicketDetail{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET updated_at = ? WHERE id = ?`, s.now().UTC().Format(time.RFC3339), internalID); err != nil {
+		return TicketDetail{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return TicketDetail{}, err
+	}
+	detail, err := s.GetTicketDetail(ctx, ticketID)
+	if err == nil {
+		s.postTicketWebhookBestEffort(ctx, "ticket.updated", detail)
+	}
+	return detail, err
 }
 
 func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (TicketDetail, error) {
@@ -456,34 +710,46 @@ func (s *Service) CreateTicket(ctx context.Context, input CreateTicketInput) (Ti
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	epicName, err := validateCreateTicketInput(ctx, tx, input)
+	epicTitle, err := s.validateCreateOrUpdateTicketInput(ctx, tx, input.Title, input.Status, input.Type, input.StoryPoints, input.EpicID, input.SprintID)
 	if err != nil {
 		return TicketDetail{}, err
 	}
-	ticketID, err := s.generateUniqueTicketID(ctx, tx, epicName, input.Type)
+	ticketID, err := s.generateUniqueTicketID(ctx, tx, epicTitle, input.Type)
 	if err != nil {
 		return TicketDetail{}, err
 	}
-	position, err := nextPosition(ctx, tx, input.SprintID, input.Status)
+	position, err := s.nextPosition(ctx, tx, input.SprintID, input.Status)
 	if err != nil {
 		return TicketDetail{}, err
 	}
 
-	result, err := tx.ExecContext(ctx, `INSERT INTO tickets(ticket_id, title, status, type, blocked, story_points, epic_id, sprint_id, github_pr_url, description, position, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	result, err := tx.ExecContext(ctx, `INSERT INTO tickets(ticket_id, title, status, type, blocked, story_points, epic_id, github_pr_url, description, position, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		ticketID, strings.TrimSpace(input.Title), string(input.Status), string(input.Type), boolToInt(input.Blocked), input.StoryPoints,
-		input.EpicID, nullableInt64(input.SprintID), nullableString(input.GitHubPRURL), nullableString(input.Description), position, now.Format(time.RFC3339), now.Format(time.RFC3339))
+		nullableInt64(input.EpicID), nullableString(input.GitHubPRURL), nullableString(input.Description), position,
+		now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return TicketDetail{}, err
 	}
-	if _, err := result.LastInsertId(); err != nil {
+	internalID, err := result.LastInsertId()
+	if err != nil {
 		return TicketDetail{}, err
+	}
+	if input.SprintID != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO sprint_tickets(sprint_id, ticket_id, added_at, removed_at) VALUES(?, ?, ?, NULL)`,
+			*input.SprintID, internalID, now.Format(time.RFC3339)); err != nil {
+			return TicketDetail{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return TicketDetail{}, err
 	}
 
-	return s.GetTicketDetail(ctx, ticketID)
+	detail, err := s.GetTicketDetail(ctx, ticketID)
+	if err == nil {
+		s.postTicketWebhookBestEffort(ctx, "ticket.created", detail)
+	}
+	return detail, err
 }
 
 func (s *Service) UpdateTicket(ctx context.Context, ticketID string, input UpdateTicketInput) (TicketDetail, error) {
@@ -493,42 +759,50 @@ func (s *Service) UpdateTicket(ctx context.Context, ticketID string, input Updat
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var current Ticket
-	row := tx.QueryRowContext(ctx, `SELECT t.id, t.ticket_id, t.title, t.status, t.type, t.blocked, t.story_points,
-		t.epic_id, e.name, t.sprint_id, COALESCE(sp.name, ''), COALESCE(t.github_pr_url, ''), COALESCE(t.description, ''),
-		COALESCE(t.position, 0), t.created_at, t.updated_at
-	FROM tickets t
-	INNER JOIN epics e ON e.id = t.epic_id
-	LEFT JOIN sprints sp ON sp.id = t.sprint_id
-	WHERE t.ticket_id = ?`, ticketID)
-	current, err = scanTicket(row)
+	current, err := s.getTicketByIDTx(ctx, tx, ticketID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return TicketDetail{}, ErrNotFound
-		}
+		return TicketDetail{}, err
+	}
+	if _, err := s.validateCreateOrUpdateTicketInput(ctx, tx, input.Title, input.Status, input.Type, input.StoryPoints, input.EpicID, nil); err != nil {
 		return TicketDetail{}, err
 	}
 
 	position := current.Position
-	if current.Status != input.Status || !sameOptionalID(current.SprintID, input.SprintID) {
-		position, err = nextPosition(ctx, tx, input.SprintID, input.Status)
+	if current.Status != input.Status {
+		position, err = s.nextPosition(ctx, tx, current.CurrentSprintID, input.Status)
 		if err != nil {
 			return TicketDetail{}, err
 		}
 	}
 
 	_, err = tx.ExecContext(ctx, `UPDATE tickets
-		SET title = ?, status = ?, type = ?, blocked = ?, story_points = ?, epic_id = ?, sprint_id = ?, github_pr_url = ?, description = ?, position = ?, updated_at = ?
+		SET title = ?, status = ?, type = ?, blocked = ?, story_points = ?, epic_id = ?, github_pr_url = ?, description = ?, position = ?, updated_at = ?
 		WHERE ticket_id = ?`,
-		strings.TrimSpace(input.Title), string(input.Status), string(input.Type), boolToInt(input.Blocked), input.StoryPoints, input.EpicID,
-		nullableInt64(input.SprintID), nullableString(input.GitHubPRURL), nullableString(input.Description), position, s.now().UTC().Format(time.RFC3339), ticketID)
+		strings.TrimSpace(input.Title), string(input.Status), string(input.Type), boolToInt(input.Blocked), input.StoryPoints, nullableInt64(input.EpicID),
+		nullableString(input.GitHubPRURL), nullableString(input.Description), position, s.now().UTC().Format(time.RFC3339), ticketID)
 	if err != nil {
 		return TicketDetail{}, err
+	}
+	if input.SprintID != nil || current.CurrentSprintID != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE sprint_tickets SET removed_at = ? WHERE ticket_id = ? AND removed_at IS NULL`,
+			s.now().UTC().Format(time.RFC3339), current.ID); err != nil {
+			return TicketDetail{}, err
+		}
+		if input.SprintID != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO sprint_tickets(sprint_id, ticket_id, added_at, removed_at) VALUES(?, ?, ?, NULL)`,
+				*input.SprintID, current.ID, s.now().UTC().Format(time.RFC3339)); err != nil {
+				return TicketDetail{}, err
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return TicketDetail{}, err
 	}
-	return s.GetTicketDetail(ctx, ticketID)
+	detail, err := s.GetTicketDetail(ctx, ticketID)
+	if err == nil {
+		s.postTicketWebhookBestEffort(ctx, "ticket.updated", detail)
+	}
+	return detail, err
 }
 
 func (s *Service) DeleteTicket(ctx context.Context, ticketID string) error {
@@ -554,11 +828,8 @@ func (s *Service) AddComment(ctx context.Context, ticketID string, input AddComm
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var internalID int64
-	if err := tx.QueryRowContext(ctx, `SELECT id FROM tickets WHERE ticket_id = ?`, ticketID).Scan(&internalID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return TicketComment{}, ErrNotFound
-		}
+	internalID, err := s.lookupTicketInternalID(ctx, tx, ticketID)
+	if err != nil {
 		return TicketComment{}, err
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO ticket_comments(ticket_id, kind, body, created_at) VALUES(?, ?, ?, ?)`,
@@ -589,17 +860,9 @@ func (s *Service) MoveTicket(ctx context.Context, ticketID string, delta int) (T
 	if next < 0 || next >= len(TicketStatuses) {
 		return detail, nil
 	}
-	return s.UpdateTicket(ctx, ticketID, UpdateTicketInput{
-		Title:       detail.Title,
-		Status:      TicketStatuses[next],
-		Type:        detail.Type,
-		Blocked:     detail.Blocked,
-		StoryPoints: detail.StoryPoints,
-		EpicID:      detail.EpicID,
-		SprintID:    detail.SprintID,
-		GitHubPRURL: detail.GitHubPRURL,
-		Description: detail.Description,
-	})
+	input := ticketToUpdateInput(detail.Ticket)
+	input.Status = TicketStatuses[next]
+	return s.UpdateTicket(ctx, ticketID, input)
 }
 
 func (s *Service) ReorderTicket(ctx context.Context, ticketID string, delta int) (TicketDetail, error) {
@@ -609,28 +872,11 @@ func (s *Service) ReorderTicket(ctx context.Context, ticketID string, delta int)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	currentRow := tx.QueryRowContext(ctx, `SELECT id, sprint_id, status, COALESCE(position, 0) FROM tickets WHERE ticket_id = ?`, ticketID)
-	var internalID int64
-	var sprintID sql.NullInt64
-	var status string
-	var position int
-	if err := currentRow.Scan(&internalID, &sprintID, &status, &position); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return TicketDetail{}, ErrNotFound
-		}
+	current, err := s.getTicketByIDTx(ctx, tx, ticketID)
+	if err != nil {
 		return TicketDetail{}, err
 	}
-
-	query := `SELECT id, COALESCE(position, 0) FROM tickets WHERE status = ? AND `
-	args := []any{status}
-	if sprintID.Valid {
-		query += `sprint_id = ? `
-		args = append(args, sprintID.Int64)
-	} else {
-		query += `sprint_id IS NULL `
-	}
-	query += `ORDER BY COALESCE(position, 0), id`
-	rows, err := tx.QueryContext(ctx, query, args...)
+	rows, err := tx.QueryContext(ctx, reorderTicketQuery(current.CurrentSprintID), reorderArgs(current.Status, current.CurrentSprintID)...)
 	if err != nil {
 		return TicketDetail{}, err
 	}
@@ -647,7 +893,7 @@ func (s *Service) ReorderTicket(ctx context.Context, ticketID string, delta int)
 		if err := rows.Scan(&item.id, &item.position); err != nil {
 			return TicketDetail{}, err
 		}
-		if item.id == internalID {
+		if item.id == current.ID {
 			currentIndex = len(items)
 		}
 		items = append(items, item)
@@ -667,10 +913,11 @@ func (s *Service) ReorderTicket(ctx context.Context, ticketID string, delta int)
 	}
 	currentPos := items[currentIndex].position
 	targetPos := items[targetIndex].position
-	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET position = ?, updated_at = ? WHERE id = ?`, targetPos, s.now().UTC().Format(time.RFC3339), items[currentIndex].id); err != nil {
+	now := s.now().UTC().Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET position = ?, updated_at = ? WHERE id = ?`, targetPos, now, items[currentIndex].id); err != nil {
 		return TicketDetail{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET position = ?, updated_at = ? WHERE id = ?`, currentPos, s.now().UTC().Format(time.RFC3339), items[targetIndex].id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE tickets SET position = ?, updated_at = ? WHERE id = ?`, currentPos, now, items[targetIndex].id); err != nil {
 		return TicketDetail{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -694,11 +941,19 @@ func (s *Service) ExportTicketMarkdown(ctx context.Context, ticketID string, out
 	b.WriteString(fmt.Sprintf("- Ticket ID: `%s`\n", data.TicketID))
 	b.WriteString(fmt.Sprintf("- Status: `%s`\n", data.Status))
 	b.WriteString(fmt.Sprintf("- Type: `%s`\n", data.Type))
-	b.WriteString(fmt.Sprintf("- Epic: `%s`\n", data.EpicName))
-	if data.SprintID != nil {
-		b.WriteString(fmt.Sprintf("- Sprint: `%s`\n", data.SprintName))
+	if data.EpicID != nil {
+		b.WriteString(fmt.Sprintf("- Epic: `%s`\n", data.EpicTitle))
+		b.WriteString(fmt.Sprintf("- Epic Status: `%s`\n", data.EpicStatus))
+		if data.EpicColor != nil && *data.EpicColor != "" {
+			b.WriteString(fmt.Sprintf("- Epic Color: `%s`\n", *data.EpicColor))
+		}
 	} else {
-		b.WriteString("- Sprint: `BACKLOG`\n")
+		b.WriteString("- Epic: `NONE`\n")
+	}
+	if data.CurrentSprintID != nil {
+		b.WriteString(fmt.Sprintf("- Current Sprint: `%s`\n", data.CurrentSprintName))
+	} else {
+		b.WriteString("- Current Sprint: `BACKLOG`\n")
 	}
 	b.WriteString(fmt.Sprintf("- Story Points: `%s`\n", FormatStoryPoints(data.StoryPoints)))
 	b.WriteString(fmt.Sprintf("- Blocked: `%t`\n", data.Blocked))
@@ -711,6 +966,23 @@ func (s *Service) ExportTicketMarkdown(ctx context.Context, ticketID string, out
 	} else {
 		b.WriteString(data.Description)
 		b.WriteString("\n")
+	}
+	b.WriteString("\n## Sprint History\n\n")
+	if len(data.SprintHistory) == 0 {
+		b.WriteString("_No sprint history._\n")
+	} else {
+		for _, membership := range data.SprintHistory {
+			removedAt := "active"
+			if membership.RemovedAt != nil {
+				removedAt = membership.RemovedAt.Format(time.RFC3339)
+			}
+			b.WriteString(fmt.Sprintf("- %s [%s] %s -> %s\n",
+				membership.SprintName,
+				membership.SprintStatus,
+				membership.AddedAt.Format(time.RFC3339),
+				removedAt,
+			))
+		}
 	}
 	b.WriteString("\n## Comments\n\n")
 	if len(data.Comments) == 0 {
@@ -748,7 +1020,7 @@ func (s *Service) ExportTicketCSV(ctx context.Context, ticketID string, outPath 
 	defer func() { _ = file.Close() }()
 
 	writer := csv.NewWriter(file)
-	header := []string{"ticket_id", "title", "status", "type", "epic", "sprint", "story_points", "blocked", "github_pr_url", "description", "comments"}
+	header := []string{"ticket_id", "title", "status", "type", "epic_id", "epic_title", "current_sprint_id", "current_sprint_name", "story_points", "blocked", "github_pr_url", "description", "comments", "sprint_history_json"}
 	if err := writer.Write(header); err != nil {
 		return "", err
 	}
@@ -757,22 +1029,25 @@ func (s *Service) ExportTicketCSV(ctx context.Context, ticketID string, outPath 
 	for _, comment := range data.Comments {
 		commentLines = append(commentLines, fmt.Sprintf("%s|%s|%s", comment.CreatedAt.Format(time.RFC3339), comment.Kind, comment.Body))
 	}
-	sprintName := "BACKLOG"
-	if data.SprintID != nil {
-		sprintName = data.SprintName
+	historyJSON, err := json.Marshal(buildWebhookSprintHistory(data.SprintHistory))
+	if err != nil {
+		return "", err
 	}
 	record := []string{
 		data.TicketID,
 		data.Title,
 		string(data.Status),
 		string(data.Type),
-		data.EpicName,
-		sprintName,
+		formatOptionalInt64(data.EpicID),
+		data.EpicTitle,
+		formatOptionalInt64(data.CurrentSprintID),
+		data.CurrentSprintName,
 		FormatStoryPoints(data.StoryPoints),
 		fmt.Sprintf("%t", data.Blocked),
 		data.GitHubPRURL,
 		data.Description,
 		strings.Join(commentLines, "\n"),
+		string(historyJSON),
 	}
 	if err := writer.Write(record); err != nil {
 		return "", err
@@ -788,7 +1063,6 @@ func (s *Service) PostSprintEndWebhooks(ctx context.Context, sprintID int64, for
 	if strings.TrimSpace(s.config.Webhook.EndpointURL) == "" {
 		return nil, ErrWebhookNotConfigured
 	}
-
 	targets, err := s.endedSprints(ctx, sprintID)
 	if err != nil {
 		return nil, err
@@ -796,8 +1070,8 @@ func (s *Service) PostSprintEndWebhooks(ctx context.Context, sprintID int64, for
 	results := make([]WebhookPostResult, 0, len(targets))
 	for _, sprint := range targets {
 		payload := SprintWebhookPayload{
-			StartDate:        sprint.StartDate.Format("2006-01-02"),
-			EndDate:          sprint.EndDate.Format("2006-01-02"),
+			StartDate:        sprint.StartsOn.Format("2006-01-02"),
+			EndDate:          sprint.EndsOn.Format("2006-01-02"),
 			TotalPoints:      sprint.TotalPoints,
 			PointsCompleted:  sprint.PointsCompleted,
 			PercentCompleted: sprint.PercentCompleted,
@@ -829,7 +1103,7 @@ func (s *Service) PostSprintEndWebhooks(ctx context.Context, sprintID int64, for
 	return results, nil
 }
 
-func (s *Service) postWebhook(ctx context.Context, payload SprintWebhookPayload) error {
+func (s *Service) postWebhook(ctx context.Context, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -867,23 +1141,26 @@ func (s *Service) postWebhook(ctx context.Context, payload SprintWebhookPayload)
 	return lastErr
 }
 
+func (s *Service) postTicketWebhookBestEffort(ctx context.Context, event string, detail TicketDetail) {
+	if strings.TrimSpace(s.config.Webhook.EndpointURL) == "" {
+		return
+	}
+	if err := s.postWebhook(ctx, buildTicketWebhookPayload(event, detail)); err != nil {
+		log.Printf("ticket webhook failed event=%s ticket=%s error=%v", event, detail.TicketID, err)
+	}
+}
+
 func (s *Service) endedSprints(ctx context.Context, sprintID int64) ([]SprintSummary, error) {
-	var filters SprintListFilters
-	sprints, err := s.ListSprints(ctx, filters)
+	sprints, err := s.ListSprints(ctx, SprintListFilters{})
 	if err != nil {
 		return nil, err
 	}
-	location, err := s.location()
-	if err != nil {
-		return nil, err
-	}
-	today := truncateDate(s.now().In(location))
 	var out []SprintSummary
 	for _, sprint := range sprints {
 		if sprintID > 0 && sprint.ID != sprintID {
 			continue
 		}
-		if dateInLocation(sprint.EndDate, location).After(today) {
+		if sprint.Status != SprintStatusClosed {
 			continue
 		}
 		out = append(out, sprint)
@@ -894,12 +1171,39 @@ func (s *Service) endedSprints(ctx context.Context, sprintID int64) ([]SprintSum
 	return out, nil
 }
 
-func (s *Service) listTicketsForSprint(ctx context.Context, sprintID *int64) ([]Ticket, error) {
-	result, err := s.ListTickets(ctx, TicketListFilters{SprintID: sprintID})
+func (s *Service) listSprintHistory(ctx context.Context, internalID int64) ([]SprintTicket, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT st.sprint_id, s.name, s.status, st.added_at, st.removed_at
+FROM sprint_tickets st
+INNER JOIN sprints s ON s.id = st.sprint_id
+WHERE st.ticket_id = ?
+ORDER BY st.added_at ASC, st.sprint_id ASC`, internalID)
 	if err != nil {
 		return nil, err
 	}
-	return result.Tickets, nil
+	defer rows.Close()
+	var history []SprintTicket
+	for rows.Next() {
+		var item SprintTicket
+		var addedAt string
+		var removedAt sql.NullString
+		if err := rows.Scan(&item.SprintID, &item.SprintName, &item.SprintStatus, &addedAt, &removedAt); err != nil {
+			return nil, err
+		}
+		item.AddedAt, err = parseTimestamp(addedAt)
+		if err != nil {
+			return nil, err
+		}
+		if removedAt.Valid {
+			parsed, err := parseTimestamp(removedAt.String)
+			if err != nil {
+				return nil, err
+			}
+			item.RemovedAt = &parsed
+		}
+		history = append(history, item)
+	}
+	return history, rows.Err()
 }
 
 func (s *Service) listCommentsByTicketInternalID(ctx context.Context, internalID int64) ([]TicketComment, error) {
@@ -908,7 +1212,6 @@ func (s *Service) listCommentsByTicketInternalID(ctx context.Context, internalID
 		return nil, err
 	}
 	defer rows.Close()
-
 	var comments []TicketComment
 	for rows.Next() {
 		var comment TicketComment
@@ -932,39 +1235,19 @@ func (s *Service) location() (*time.Location, error) {
 	return time.LoadLocation(s.config.App.Timezone)
 }
 
-func (s *Service) deriveSprintStatus(sprint Sprint) (SprintStatus, error) {
-	location, err := s.location()
-	if err != nil {
-		return SprintStatusNotStarted, err
-	}
-	today := truncateDate(s.now().In(location))
-	start := dateInLocation(sprint.StartDate, location)
-	end := dateInLocation(sprint.EndDate, location)
-	switch {
-	case today.Before(start):
-		return SprintStatusNotStarted, nil
-	case today.After(end):
-		return SprintStatusDone, nil
-	default:
-		return SprintStatusInProgress, nil
-	}
-}
-
-func (s *Service) ensureSprintNoOverlap(ctx context.Context, sprintID int64, startDate, endDate time.Time) error {
-	row := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE id != ? AND start_date <= ? AND end_date >= ?`,
-		sprintID, endDate.Format("2006-01-02"), startDate.Format("2006-01-02"))
+func (s *Service) ensureNoOtherActiveSprint(ctx context.Context, tx *sql.Tx, allowedID int64) error {
 	var count int
-	if err := row.Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE status = 'active' AND id != ?`, allowedID).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
-		return ErrSprintOverlap
+		return ErrActiveSprintExists
 	}
 	return nil
 }
 
-func (s *Service) generateUniqueTicketID(ctx context.Context, tx *sql.Tx, epicName string, ticketType TicketType) (string, error) {
-	base := initials(epicName)
+func (s *Service) generateUniqueTicketID(ctx context.Context, tx *sql.Tx, epicTitle string, ticketType TicketType) (string, error) {
+	base := initials(epicTitle)
 	if base == "" {
 		base = "TKT"
 	}
@@ -997,9 +1280,155 @@ func (s *Service) generateUniqueTicketID(ctx context.Context, tx *sql.Tx, epicNa
 	return "", fmt.Errorf("could not generate unique ticket id")
 }
 
+func (s *Service) validateCreateOrUpdateTicketInput(ctx context.Context, tx *sql.Tx, title string, status TicketStatus, ticketType TicketType, storyPoints float64, epicID *int64, sprintID *int64) (string, error) {
+	if strings.TrimSpace(title) == "" {
+		return "", fmt.Errorf("title is required")
+	}
+	if !isValidTicketStatus(status) {
+		return "", fmt.Errorf("invalid ticket status %q", status)
+	}
+	if !isValidTicketType(ticketType) {
+		return "", fmt.Errorf("invalid ticket type %q", ticketType)
+	}
+	if !isFiniteStoryPoints(storyPoints) || storyPoints < 0 {
+		return "", fmt.Errorf("story points must be greater than or equal to 0")
+	}
+	epicTitle := ""
+	if epicID != nil {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM epics WHERE id = ?`, *epicID).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return "", fmt.Errorf("unknown epic id %d", *epicID)
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT title FROM epics WHERE id = ?`, *epicID).Scan(&epicTitle); err != nil {
+			return "", err
+		}
+	}
+	if sprintID != nil {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE id = ?`, *sprintID).Scan(&count); err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return "", fmt.Errorf("unknown sprint id %d", *sprintID)
+		}
+	}
+	return epicTitle, nil
+}
+
+func (s *Service) nextPosition(ctx context.Context, tx *sql.Tx, sprintID *int64, status TicketStatus) (int, error) {
+	var (
+		query string
+		args  []any
+	)
+	if sprintID != nil {
+		query = `
+SELECT COALESCE(MAX(t.position), -1) + 1
+FROM tickets t
+INNER JOIN sprint_tickets st ON st.ticket_id = t.id AND st.removed_at IS NULL AND st.sprint_id = ?
+INNER JOIN sprints sp ON sp.id = st.sprint_id AND sp.status = 'active'
+WHERE t.status = ?`
+		args = []any{*sprintID, string(status)}
+	} else {
+		query = `
+SELECT COALESCE(MAX(t.position), -1) + 1
+FROM tickets t
+LEFT JOIN sprint_tickets st ON st.ticket_id = t.id AND st.removed_at IS NULL
+LEFT JOIN sprints sp ON sp.id = st.sprint_id AND sp.status = 'active'
+WHERE t.status = ? AND sp.id IS NULL`
+		args = []any{string(status)}
+	}
+	var next int
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&next); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func (s *Service) lookupTicketInternalID(ctx context.Context, tx *sql.Tx, ticketID string) (int64, error) {
+	var internalID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM tickets WHERE ticket_id = ?`, ticketID).Scan(&internalID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, err
+	}
+	return internalID, nil
+}
+
+func (s *Service) getTicketByIDTx(ctx context.Context, tx *sql.Tx, ticketID string) (Ticket, error) {
+	row := tx.QueryRowContext(ctx, ticketSelectQuery()+" WHERE t.ticket_id = ?", ticketID)
+	ticket, err := scanTicket(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Ticket{}, ErrNotFound
+		}
+		return Ticket{}, err
+	}
+	return ticket, nil
+}
+
+func ticketSelectQuery() string {
+	return `SELECT
+	t.id,
+	t.ticket_id,
+	t.title,
+	t.status,
+	t.type,
+	t.blocked,
+	t.story_points,
+	t.epic_id,
+	COALESCE(e.title, ''),
+	COALESCE(e.status, ''),
+	e.color,
+	cur.sprint_id,
+	COALESCE(cur.name, ''),
+	COALESCE(t.github_pr_url, ''),
+	COALESCE(t.description, ''),
+	COALESCE(t.position, 0),
+	t.created_at,
+	t.updated_at
+FROM tickets t
+LEFT JOIN epics e ON e.id = t.epic_id
+LEFT JOIN (
+	SELECT st.ticket_id, st.sprint_id, s.name
+	FROM sprint_tickets st
+	INNER JOIN sprints s ON s.id = st.sprint_id
+	WHERE st.removed_at IS NULL AND s.status = 'active'
+) cur ON cur.ticket_id = t.id`
+}
+
+func ticketOrderClause() string {
+	return " ORDER BY CASE t.status WHEN 'NOT_STARTED' THEN 1 WHEN 'IN_PROGRESS' THEN 2 WHEN 'UNDER_REVIEW' THEN 3 ELSE 4 END, COALESCE(t.position, 0), t.updated_at DESC, t.id DESC"
+}
+
+func reorderTicketQuery(sprintID *int64) string {
+	base := `SELECT t.id, COALESCE(t.position, 0) FROM tickets t `
+	if sprintID != nil {
+		base += `INNER JOIN sprint_tickets st ON st.ticket_id = t.id AND st.removed_at IS NULL AND st.sprint_id = ? INNER JOIN sprints s ON s.id = st.sprint_id AND s.status = 'active' `
+		base += `WHERE t.status = ? ORDER BY COALESCE(t.position, 0), id`
+		return base
+	}
+	base += `LEFT JOIN sprint_tickets st ON st.ticket_id = t.id AND st.removed_at IS NULL LEFT JOIN sprints s ON s.id = st.sprint_id AND s.status = 'active' `
+	base += `WHERE t.status = ? AND s.id IS NULL ORDER BY COALESCE(t.position, 0), id`
+	return base
+}
+
+func reorderArgs(status TicketStatus, sprintID *int64) []any {
+	if sprintID != nil {
+		return []any{*sprintID, string(status)}
+	}
+	return []any{string(status)}
+}
+
 func scanTicket(scanner interface{ Scan(dest ...any) error }) (Ticket, error) {
 	var ticket Ticket
 	var blocked int
+	var epicID sql.NullInt64
+	var epicStatus sql.NullString
+	var epicColor sql.NullString
 	var sprintID sql.NullInt64
 	var createdAt string
 	var updatedAt string
@@ -1011,10 +1440,12 @@ func scanTicket(scanner interface{ Scan(dest ...any) error }) (Ticket, error) {
 		&ticket.Type,
 		&blocked,
 		&ticket.StoryPoints,
-		&ticket.EpicID,
-		&ticket.EpicName,
+		&epicID,
+		&ticket.EpicTitle,
+		&epicStatus,
+		&epicColor,
 		&sprintID,
-		&ticket.SprintName,
+		&ticket.CurrentSprintName,
 		&ticket.GitHubPRURL,
 		&ticket.Description,
 		&ticket.Position,
@@ -1024,10 +1455,24 @@ func scanTicket(scanner interface{ Scan(dest ...any) error }) (Ticket, error) {
 		return Ticket{}, err
 	}
 	ticket.Blocked = blocked == 1
+	if epicID.Valid {
+		value := epicID.Int64
+		ticket.EpicID = &value
+	}
+	ticket.EpicName = ticket.EpicTitle
+	if epicStatus.Valid {
+		ticket.EpicStatus = EpicStatus(epicStatus.String)
+	}
+	if epicColor.Valid {
+		value := epicColor.String
+		ticket.EpicColor = &value
+	}
 	if sprintID.Valid {
 		value := sprintID.Int64
-		ticket.SprintID = &value
+		ticket.CurrentSprintID = &value
 	}
+	ticket.SprintID = ticket.CurrentSprintID
+	ticket.SprintName = ticket.CurrentSprintName
 	var err error
 	ticket.CreatedAt, err = parseTimestamp(createdAt)
 	if err != nil {
@@ -1040,21 +1485,47 @@ func scanTicket(scanner interface{ Scan(dest ...any) error }) (Ticket, error) {
 	return ticket, nil
 }
 
+func scanEpic(scanner interface{ Scan(dest ...any) error }) (Epic, error) {
+	var epic Epic
+	var color sql.NullString
+	var createdAt string
+	var updatedAt string
+	if err := scanner.Scan(&epic.ID, &epic.Title, &epic.Status, &color, &createdAt, &updatedAt); err != nil {
+		return Epic{}, err
+	}
+	if color.Valid {
+		value := color.String
+		epic.Color = &value
+	}
+	epic.Name = epic.Title
+	var err error
+	epic.CreatedAt, err = parseTimestamp(createdAt)
+	if err != nil {
+		return Epic{}, err
+	}
+	epic.UpdatedAt, err = parseTimestamp(updatedAt)
+	if err != nil {
+		return Epic{}, err
+	}
+	return epic, nil
+}
+
 func scanSprint(scanner interface{ Scan(dest ...any) error }) (Sprint, error) {
 	var sprint Sprint
-	var startDate string
-	var endDate string
+	var startsOn string
+	var endsOn string
 	var createdAt string
-	var completedAt sql.NullString
-	if err := scanner.Scan(&sprint.ID, &sprint.Name, &sprint.Quarter, &startDate, &endDate, &createdAt, &completedAt); err != nil {
+	var updatedAt string
+	var closedAt sql.NullString
+	if err := scanner.Scan(&sprint.ID, &sprint.Name, &sprint.Goal, &sprint.Status, &startsOn, &endsOn, &createdAt, &updatedAt, &closedAt); err != nil {
 		return Sprint{}, err
 	}
 	var err error
-	sprint.StartDate, err = parseDate(startDate)
+	sprint.StartsOn, err = parseDate(startsOn)
 	if err != nil {
 		return Sprint{}, err
 	}
-	sprint.EndDate, err = parseDate(endDate)
+	sprint.EndsOn, err = parseDate(endsOn)
 	if err != nil {
 		return Sprint{}, err
 	}
@@ -1062,15 +1533,22 @@ func scanSprint(scanner interface{ Scan(dest ...any) error }) (Sprint, error) {
 	if err != nil {
 		return Sprint{}, err
 	}
-	if completedAt.Valid {
-		parsed, err := parseTimestamp(completedAt.String)
+	sprint.UpdatedAt, err = parseTimestamp(updatedAt)
+	if err != nil {
+		return Sprint{}, err
+	}
+	if closedAt.Valid {
+		parsed, err := parseTimestamp(closedAt.String)
 		if err != nil {
 			return Sprint{}, err
 		}
-		sprint.CompletedAt = &parsed
+		sprint.ClosedAt = &parsed
 	}
-	sprint.StartDate = truncateDate(sprint.StartDate)
-	sprint.EndDate = truncateDate(sprint.EndDate)
+	sprint.StartsOn = truncateDate(sprint.StartsOn)
+	sprint.EndsOn = truncateDate(sprint.EndsOn)
+	sprint.StartDate = sprint.StartsOn
+	sprint.EndDate = sprint.EndsOn
+	sprint.CompletedAt = sprint.ClosedAt
 	return sprint, nil
 }
 
@@ -1092,49 +1570,6 @@ func parseDate(value string) (time.Time, error) {
 		return parsed, nil
 	}
 	return parseTimestamp(value)
-}
-
-func lookupEpicName(ctx context.Context, tx *sql.Tx, epicID int64) (string, error) {
-	var name string
-	if err := tx.QueryRowContext(ctx, `SELECT name FROM epics WHERE id = ?`, epicID).Scan(&name); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNotFound
-		}
-		return "", err
-	}
-	return name, nil
-}
-
-func validateCreateTicketInput(ctx context.Context, tx *sql.Tx, input CreateTicketInput) (string, error) {
-	if strings.TrimSpace(input.Title) == "" {
-		return "", fmt.Errorf("title is required")
-	}
-	if !isValidTicketStatus(input.Status) {
-		return "", fmt.Errorf("invalid ticket status %q", input.Status)
-	}
-	if !isValidTicketType(input.Type) {
-		return "", fmt.Errorf("invalid ticket type %q", input.Type)
-	}
-	if !isFiniteStoryPoints(input.StoryPoints) || input.StoryPoints < 0 {
-		return "", fmt.Errorf("story points must be greater than or equal to 0")
-	}
-	epicName, err := lookupEpicName(ctx, tx, input.EpicID)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return "", fmt.Errorf("unknown epic id %d", input.EpicID)
-		}
-		return "", err
-	}
-	if input.SprintID != nil {
-		var count int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM sprints WHERE id = ?`, *input.SprintID).Scan(&count); err != nil {
-			return "", err
-		}
-		if count == 0 {
-			return "", fmt.Errorf("unknown sprint id %d", *input.SprintID)
-		}
-	}
-	return epicName, nil
 }
 
 func isFiniteStoryPoints(value float64) bool {
@@ -1159,20 +1594,22 @@ func isValidTicketType(ticketType TicketType) bool {
 	return false
 }
 
-func nextPosition(ctx context.Context, tx *sql.Tx, sprintID *int64, status TicketStatus) (int, error) {
-	query := `SELECT COALESCE(MAX(position), -1) + 1 FROM tickets WHERE status = ? AND `
-	args := []any{string(status)}
-	if sprintID != nil {
-		query += `sprint_id = ?`
-		args = append(args, *sprintID)
-	} else {
-		query += `sprint_id IS NULL`
+func isValidSprintStatus(status SprintStatus) bool {
+	for _, candidate := range SprintStatuses {
+		if candidate == status {
+			return true
+		}
 	}
-	var next int
-	if err := tx.QueryRowContext(ctx, query, args...).Scan(&next); err != nil {
-		return 0, err
+	return false
+}
+
+func isValidEpicStatus(status EpicStatus) bool {
+	for _, candidate := range EpicStatuses {
+		if candidate == status {
+			return true
+		}
 	}
-	return next, nil
+	return false
 }
 
 func validateSprintDates(startDate, endDate time.Time) error {
@@ -1247,15 +1684,15 @@ func nullableString(value string) any {
 	return trimmed
 }
 
-func sameOptionalID(a, b *int64) bool {
-	switch {
-	case a == nil && b == nil:
-		return true
-	case a == nil || b == nil:
-		return false
-	default:
-		return *a == *b
+func nullableColor(value *string) any {
+	if value == nil {
+		return nil
 	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return trimmed
 }
 
 func hashPayload(payload SprintWebhookPayload) (string, error) {
@@ -1265,6 +1702,95 @@ func hashPayload(payload SprintWebhookPayload) (string, error) {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func buildTicketWebhookPayload(event string, detail TicketDetail) TicketWebhookPayload {
+	var epic *TicketWebhookEpic
+	if detail.EpicID != nil {
+		epic = &TicketWebhookEpic{
+			ID:     *detail.EpicID,
+			Title:  detail.EpicTitle,
+			Status: detail.EpicStatus,
+			Color:  detail.EpicColor,
+		}
+	}
+	var currentSprint *TicketWebhookSprint
+	if detail.CurrentSprintID != nil {
+		status := SprintStatusActive
+		if len(detail.SprintHistory) > 0 {
+			for i := len(detail.SprintHistory) - 1; i >= 0; i-- {
+				if detail.SprintHistory[i].RemovedAt == nil && detail.SprintHistory[i].SprintID == *detail.CurrentSprintID {
+					status = detail.SprintHistory[i].SprintStatus
+					break
+				}
+			}
+		}
+		currentSprint = &TicketWebhookSprint{
+			ID:     *detail.CurrentSprintID,
+			Name:   detail.CurrentSprintName,
+			Status: status,
+		}
+	}
+	return TicketWebhookPayload{
+		Event: event,
+		Ticket: TicketWebhookData{
+			TicketID:        detail.TicketID,
+			Title:           detail.Title,
+			Status:          detail.Status,
+			Type:            detail.Type,
+			Blocked:         detail.Blocked,
+			StoryPoints:     detail.StoryPoints,
+			EpicID:          detail.EpicID,
+			Epic:            epic,
+			CurrentSprintID: detail.CurrentSprintID,
+			CurrentSprint:   currentSprint,
+			SprintHistory:   buildWebhookSprintHistory(detail.SprintHistory),
+			GitHubPRURL:     detail.GitHubPRURL,
+			Description:     detail.Description,
+			CreatedAt:       detail.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:       detail.UpdatedAt.Format(time.RFC3339),
+		},
+	}
+}
+
+func buildWebhookSprintHistory(history []SprintTicket) []TicketWebhookSprintLink {
+	out := make([]TicketWebhookSprintLink, 0, len(history))
+	for _, membership := range history {
+		var removedAt *string
+		if membership.RemovedAt != nil {
+			value := membership.RemovedAt.Format(time.RFC3339)
+			removedAt = &value
+		}
+		out = append(out, TicketWebhookSprintLink{
+			SprintID:   membership.SprintID,
+			SprintName: membership.SprintName,
+			Status:     membership.SprintStatus,
+			AddedAt:    membership.AddedAt.Format(time.RFC3339),
+			RemovedAt:  removedAt,
+		})
+	}
+	return out
+}
+
+func formatOptionalInt64(value *int64) string {
+	if value == nil {
+		return ""
+	}
+	return fmt.Sprintf("%d", *value)
+}
+
+func ticketToUpdateInput(ticket Ticket) UpdateTicketInput {
+	return UpdateTicketInput{
+		Title:       ticket.Title,
+		Status:      ticket.Status,
+		Type:        ticket.Type,
+		Blocked:     ticket.Blocked,
+		StoryPoints: ticket.StoryPoints,
+		EpicID:      ticket.EpicID,
+		SprintID:    ticket.CurrentSprintID,
+		GitHubPRURL: ticket.GitHubPRURL,
+		Description: ticket.Description,
+	}
 }
 
 func max(a, b int) int {

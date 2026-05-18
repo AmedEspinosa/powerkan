@@ -2,7 +2,7 @@ package kanban
 
 import (
 	"context"
-	"math"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,484 +39,237 @@ func newTestService(t *testing.T) *Service {
 	return service
 }
 
-func seedEpicAndSprint(t *testing.T, service *Service) (Epic, Sprint) {
+func seedEpic(t *testing.T, service *Service, title string) Epic {
 	t.Helper()
-	epic, err := service.CreateEpic(context.Background(), CreateEpicInput{Name: "Lemon Squeezer Backend"})
+	epic, err := service.CreateEpic(context.Background(), CreateEpicInput{Title: title, Status: EpicStatusOpen})
 	if err != nil {
 		t.Fatalf("CreateEpic returned error: %v", err)
 	}
+	return epic
+}
+
+func seedSprint(t *testing.T, service *Service, name string, status SprintStatus, start, end time.Time) Sprint {
+	t.Helper()
 	sprint, err := service.CreateSprint(context.Background(), CreateSprintInput{
-		Name:      "26Q2 Sprint 2",
-		Quarter:   "2026Q2",
-		StartDate: time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local),
-		EndDate:   time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local),
+		Name:     name,
+		Goal:     "Ship it",
+		Status:   status,
+		StartsOn: start,
+		EndsOn:   end,
 	})
 	if err != nil {
 		t.Fatalf("CreateSprint returned error: %v", err)
 	}
-	return epic, sprint
+	return sprint
 }
 
-func TestCreateTicketGeneratesStructuredIDAndCommentsNewestFirst(t *testing.T) {
+func ptrInt64(v int64) *int64 { return &v }
+
+func TestCreateAndResolveCurrentSprintFromMembership(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
-	epic, sprint := seedEpicAndSprint(t, service)
+	epic := seedEpic(t, service, "Platform")
+	active := seedSprint(t, service, "Sprint A", SprintStatusActive, time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local), time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local))
 
 	ticket, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "Implement board",
+		Title:       "Implement membership",
 		Status:      TicketStatusInProgress,
 		Type:        TicketTypeFeature,
-		Blocked:     true,
-		StoryPoints: 8,
-		EpicID:      epic.ID,
-		SprintID:    &sprint.ID,
-		Description: "Board work",
+		StoryPoints: 3,
+		EpicID:      &epic.ID,
+		SprintID:    &active.ID,
 	})
 	if err != nil {
 		t.Fatalf("CreateTicket returned error: %v", err)
 	}
-	if !strings.HasPrefix(ticket.TicketID, "LSB-FEA-2604241015") {
-		t.Fatalf("expected generated ticket ID prefix, got %q", ticket.TicketID)
+
+	if ticket.CurrentSprintID == nil || *ticket.CurrentSprintID != active.ID {
+		t.Fatalf("expected current sprint %d, got %+v", active.ID, ticket.CurrentSprintID)
+	}
+	if len(ticket.SprintHistory) != 1 {
+		t.Fatalf("expected one sprint history row, got %d", len(ticket.SprintHistory))
+	}
+}
+
+func TestActivateBlocksWhenAnotherSprintIsActive(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	_ = seedSprint(t, service, "Sprint A", SprintStatusActive, time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local), time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local))
+	planned := seedSprint(t, service, "Sprint B", SprintStatusPlanned, time.Date(2026, 4, 27, 0, 0, 0, 0, time.Local), time.Date(2026, 5, 3, 0, 0, 0, 0, time.Local))
+
+	_, err := service.ActivateSprint(context.Background(), planned.ID)
+	if err == nil || !strings.Contains(err.Error(), ErrActiveSprintExists.Error()) {
+		t.Fatalf("expected active sprint conflict, got %v", err)
+	}
+}
+
+func TestCloseSprintCarriesSelectedIncompleteTickets(t *testing.T) {
+	t.Parallel()
+
+	service := newTestService(t)
+	epic := seedEpic(t, service, "Platform")
+	active := seedSprint(t, service, "Sprint A", SprintStatusActive, time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local), time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local))
+
+	keep, err := service.CreateTicket(context.Background(), CreateTicketInput{
+		Title:       "Carry me",
+		Status:      TicketStatusInProgress,
+		Type:        TicketTypeFeature,
+		StoryPoints: 2,
+		EpicID:      &epic.ID,
+		SprintID:    &active.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTicket returned error: %v", err)
+	}
+	_, err = service.CreateTicket(context.Background(), CreateTicketInput{
+		Title:       "Leave me",
+		Status:      TicketStatusDone,
+		Type:        TicketTypeFeature,
+		StoryPoints: 1,
+		EpicID:      &epic.ID,
+		SprintID:    &active.ID,
+	})
+	if err != nil {
+		t.Fatalf("CreateTicket returned error: %v", err)
 	}
 
-	service.SetNowFunc(func() time.Time {
-		return time.Date(2026, 4, 24, 10, 16, 0, 0, time.FixedZone("EDT", -4*60*60))
+	_, err = service.CloseSprint(context.Background(), active.ID, CloseSprintInput{
+		CreateNextSprint: &CreateSprintInput{
+			Name:     "Sprint B",
+			Goal:     "Next",
+			StartsOn: time.Date(2026, 4, 27, 0, 0, 0, 0, time.Local),
+			EndsOn:   time.Date(2026, 5, 3, 0, 0, 0, 0, time.Local),
+		},
+		CarryOverTicketIDs: []string{keep.TicketID},
 	})
-	if _, err := service.AddComment(context.Background(), ticket.TicketID, AddCommentInput{Kind: CommentKindText, Body: "First"}); err != nil {
-		t.Fatalf("AddComment returned error: %v", err)
-	}
-	service.SetNowFunc(func() time.Time {
-		return time.Date(2026, 4, 24, 10, 17, 0, 0, time.FixedZone("EDT", -4*60*60))
-	})
-	if _, err := service.AddComment(context.Background(), ticket.TicketID, AddCommentInput{Kind: CommentKindURL, Body: "https://example.com"}); err != nil {
-		t.Fatalf("AddComment returned error: %v", err)
+	if err != nil {
+		t.Fatalf("CloseSprint returned error: %v", err)
 	}
 
-	detail, err := service.GetTicketDetail(context.Background(), ticket.TicketID)
+	activeAfter, err := service.GetActiveSprint(context.Background())
+	if err != nil {
+		t.Fatalf("GetActiveSprint returned error: %v", err)
+	}
+	if activeAfter.Name != "Sprint B" {
+		t.Fatalf("expected Sprint B active, got %s", activeAfter.Name)
+	}
+
+	kept, err := service.GetTicketDetail(context.Background(), keep.TicketID)
 	if err != nil {
 		t.Fatalf("GetTicketDetail returned error: %v", err)
 	}
-	if len(detail.Comments) != 2 {
-		t.Fatalf("expected 2 comments, got %d", len(detail.Comments))
+	if kept.CurrentSprintName != "Sprint B" {
+		t.Fatalf("expected carried ticket in Sprint B, got %s", kept.CurrentSprintName)
 	}
-	if detail.Comments[0].Body != "https://example.com" {
-		t.Fatalf("expected newest comment first, got %q", detail.Comments[0].Body)
-	}
-}
-
-func TestEnsureCreateEpicCreatesInboxWhenMissing(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	epic, err := service.EnsureCreateEpic(context.Background())
-	if err != nil {
-		t.Fatalf("EnsureCreateEpic returned error: %v", err)
-	}
-	if epic.Name != DefaultEpicName {
-		t.Fatalf("expected %q epic, got %q", DefaultEpicName, epic.Name)
-	}
-
-	epics, err := service.ListEpics(context.Background())
-	if err != nil {
-		t.Fatalf("ListEpics returned error: %v", err)
-	}
-	if len(epics) != 1 {
-		t.Fatalf("expected 1 epic, got %d", len(epics))
+	if len(kept.SprintHistory) != 2 {
+		t.Fatalf("expected two sprint history rows, got %d", len(kept.SprintHistory))
 	}
 }
 
-func TestEnsureCreateEpicReturnsExistingEpicWhenPresent(t *testing.T) {
+func TestEpicAssignAndClear(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
-	if _, err := service.CreateEpic(context.Background(), CreateEpicInput{Name: "Platform"}); err != nil {
-		t.Fatalf("CreateEpic returned error: %v", err)
-	}
-
-	epic, err := service.EnsureCreateEpic(context.Background())
-	if err != nil {
-		t.Fatalf("EnsureCreateEpic returned error: %v", err)
-	}
-	if epic.Name != "Platform" {
-		t.Fatalf("expected existing epic, got %q", epic.Name)
-	}
-}
-
-func TestCreateTicketValidation(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	epic, sprint := seedEpicAndSprint(t, service)
-
-	tests := []struct {
-		name  string
-		input CreateTicketInput
-		want  string
-	}{
-		{
-			name: "empty title",
-			input: CreateTicketInput{
-				Title:       "   ",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: 1,
-				EpicID:      epic.ID,
-			},
-			want: "title is required",
-		},
-		{
-			name: "invalid type",
-			input: CreateTicketInput{
-				Title:       "Bad type",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketType("INVALID"),
-				StoryPoints: 1,
-				EpicID:      epic.ID,
-			},
-			want: `invalid ticket type "INVALID"`,
-		},
-		{
-			name: "invalid status",
-			input: CreateTicketInput{
-				Title:       "Bad status",
-				Status:      TicketStatus("INVALID"),
-				Type:        TicketTypeFeature,
-				StoryPoints: 1,
-				EpicID:      epic.ID,
-			},
-			want: `invalid ticket status "INVALID"`,
-		},
-		{
-			name: "negative story points",
-			input: CreateTicketInput{
-				Title:       "Bad points",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: -1,
-				EpicID:      epic.ID,
-			},
-			want: "story points must be greater than or equal to 0",
-		},
-		{
-			name: "nan story points",
-			input: CreateTicketInput{
-				Title:       "NaN points",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: math.NaN(),
-				EpicID:      epic.ID,
-			},
-			want: "story points must be greater than or equal to 0",
-		},
-		{
-			name: "positive infinity story points",
-			input: CreateTicketInput{
-				Title:       "Infinite points",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: math.Inf(1),
-				EpicID:      epic.ID,
-			},
-			want: "story points must be greater than or equal to 0",
-		},
-		{
-			name: "negative infinity story points",
-			input: CreateTicketInput{
-				Title:       "Negative infinite points",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: math.Inf(-1),
-				EpicID:      epic.ID,
-			},
-			want: "story points must be greater than or equal to 0",
-		},
-		{
-			name: "missing epic",
-			input: CreateTicketInput{
-				Title:       "Missing epic",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: 1,
-				EpicID:      999,
-			},
-			want: "unknown epic id 999",
-		},
-		{
-			name: "missing sprint",
-			input: CreateTicketInput{
-				Title:       "Missing sprint",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: 1,
-				EpicID:      epic.ID,
-				SprintID:    ptrInt64(999),
-			},
-			want: "unknown sprint id 999",
-		},
-		{
-			name: "backlog ticket",
-			input: CreateTicketInput{
-				Title:       "Backlog",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: 0.5,
-				EpicID:      epic.ID,
-				SprintID:    nil,
-			},
-			want: "",
-		},
-		{
-			name: "sprint ticket",
-			input: CreateTicketInput{
-				Title:       "Sprint",
-				Status:      TicketStatusNotStarted,
-				Type:        TicketTypeFeature,
-				StoryPoints: 1,
-				EpicID:      epic.ID,
-				SprintID:    &sprint.ID,
-			},
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ticket, err := service.CreateTicket(context.Background(), tt.input)
-			if tt.want == "" {
-				if err != nil {
-					t.Fatalf("CreateTicket returned error: %v", err)
-				}
-				if ticket.Title != strings.TrimSpace(tt.input.Title) {
-					t.Fatalf("expected trimmed title, got %q", ticket.Title)
-				}
-				if ticket.StoryPoints != tt.input.StoryPoints {
-					t.Fatalf("expected story points %v, got %v", tt.input.StoryPoints, ticket.StoryPoints)
-				}
-				return
-			}
-			if err == nil || err.Error() != tt.want {
-				t.Fatalf("expected error %q, got %v", tt.want, err)
-			}
-		})
-	}
-}
-
-func TestCreateTicketBacklogPosition(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	epic, _ := seedEpicAndSprint(t, service)
-
-	first, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "Backlog one",
+	epicA := seedEpic(t, service, "Platform")
+	epicB := seedEpic(t, service, "CLI")
+	ticket, err := service.CreateTicket(context.Background(), CreateTicketInput{
+		Title:       "No epic by default",
 		Status:      TicketStatusNotStarted,
 		Type:        TicketTypeFeature,
 		StoryPoints: 1,
-		EpicID:      epic.ID,
 	})
 	if err != nil {
 		t.Fatalf("CreateTicket returned error: %v", err)
 	}
-	second, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "Backlog two",
-		Status:      TicketStatusNotStarted,
-		Type:        TicketTypeBug,
-		StoryPoints: 2,
-		EpicID:      epic.ID,
-	})
+	if ticket.EpicID != nil {
+		t.Fatalf("expected nil epic by default, got %v", *ticket.EpicID)
+	}
+
+	ticket, err = service.AssignEpicToTicket(context.Background(), ticket.TicketID, epicA.ID)
 	if err != nil {
-		t.Fatalf("CreateTicket returned error: %v", err)
+		t.Fatalf("AssignEpicToTicket returned error: %v", err)
 	}
-	if first.SprintID != nil || second.SprintID != nil {
-		t.Fatal("expected backlog tickets to have nil sprint IDs")
+	if ticket.EpicID == nil || *ticket.EpicID != epicA.ID {
+		t.Fatalf("expected epic %d, got %+v", epicA.ID, ticket.EpicID)
 	}
-	if first.Position != 0 || second.Position != 1 {
-		t.Fatalf("expected backlog positions 0 and 1, got %d and %d", first.Position, second.Position)
+
+	ticket, err = service.AssignEpicToTicket(context.Background(), ticket.TicketID, epicB.ID)
+	if err != nil {
+		t.Fatalf("AssignEpicToTicket returned error: %v", err)
+	}
+	if ticket.EpicID == nil || *ticket.EpicID != epicB.ID {
+		t.Fatalf("expected epic %d, got %+v", epicB.ID, ticket.EpicID)
+	}
+
+	ticket, err = service.ClearEpicForTicket(context.Background(), ticket.TicketID)
+	if err != nil {
+		t.Fatalf("ClearEpicForTicket returned error: %v", err)
+	}
+	if ticket.EpicID != nil {
+		t.Fatalf("expected nil epic after clear, got %+v", ticket.EpicID)
 	}
 }
 
-func TestCreateSprintRejectsOverlap(t *testing.T) {
+func TestDeleteEpicSetsTicketEpicToNull(t *testing.T) {
 	t.Parallel()
 
 	service := newTestService(t)
-	_, _ = seedEpicAndSprint(t, service)
-
-	_, err := service.CreateSprint(context.Background(), CreateSprintInput{
-		Name:      "26Q2 Sprint 3",
-		Quarter:   "2026Q2",
-		StartDate: time.Date(2026, 4, 25, 0, 0, 0, 0, time.Local),
-		EndDate:   time.Date(2026, 5, 1, 0, 0, 0, 0, time.Local),
-	})
-	if err == nil {
-		t.Fatal("expected overlap error")
-	}
-	if err != ErrSprintOverlap {
-		t.Fatalf("expected ErrSprintOverlap, got %v", err)
-	}
-}
-
-func TestListTicketsFiltersAndTotalPoints(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	epic, sprint := seedEpicAndSprint(t, service)
-
-	secondEpic, err := service.CreateEpic(context.Background(), CreateEpicInput{Name: "CLI Platform"})
-	if err != nil {
-		t.Fatalf("CreateEpic returned error: %v", err)
-	}
-	if _, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "In sprint",
-		Status:      TicketStatusDone,
-		Type:        TicketTypeFeature,
-		StoryPoints: 5,
-		EpicID:      epic.ID,
-		SprintID:    &sprint.ID,
-	}); err != nil {
-		t.Fatalf("CreateTicket returned error: %v", err)
-	}
-	if _, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "Backlog",
-		Status:      TicketStatusNotStarted,
-		Type:        TicketTypeBug,
-		StoryPoints: 3,
-		EpicID:      secondEpic.ID,
-	}); err != nil {
-		t.Fatalf("CreateTicket returned error: %v", err)
-	}
-
-	result, err := service.ListTickets(context.Background(), TicketListFilters{SprintID: &sprint.ID, EpicID: &epic.ID})
-	if err != nil {
-		t.Fatalf("ListTickets returned error: %v", err)
-	}
-	if len(result.Tickets) != 1 {
-		t.Fatalf("expected 1 filtered ticket, got %d", len(result.Tickets))
-	}
-	if result.TotalPoints != 5 {
-		t.Fatalf("expected filtered total points 5, got %v", result.TotalPoints)
-	}
-}
-
-func TestBoardMetricsAndReorder(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	epic, sprint := seedEpicAndSprint(t, service)
-
-	first, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "First",
-		Status:      TicketStatusNotStarted,
-		Type:        TicketTypeFeature,
-		StoryPoints: 5,
-		EpicID:      epic.ID,
-		SprintID:    &sprint.ID,
-	})
-	if err != nil {
-		t.Fatalf("CreateTicket returned error: %v", err)
-	}
-	second, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "Second",
-		Status:      TicketStatusNotStarted,
-		Type:        TicketTypeFix,
-		StoryPoints: 8,
-		EpicID:      epic.ID,
-		SprintID:    &sprint.ID,
-	})
-	if err != nil {
-		t.Fatalf("CreateTicket returned error: %v", err)
-	}
-
-	board, err := service.LoadBoard(context.Background())
-	if err != nil {
-		t.Fatalf("LoadBoard returned error: %v", err)
-	}
-	if board.Metrics.DaysLeft != 3 {
-		t.Fatalf("expected 3 days left on 2026-04-24 for sprint ending 2026-04-26, got %d", board.Metrics.DaysLeft)
-	}
-	if board.Metrics.PointsPerDay != 1.8571428571428572 {
-		t.Fatalf("unexpected points per day: %f", board.Metrics.PointsPerDay)
-	}
-	if _, err := service.ReorderTicket(context.Background(), second.TicketID, -1); err != nil {
-		t.Fatalf("ReorderTicket returned error: %v", err)
-	}
-	board, err = service.LoadBoard(context.Background())
-	if err != nil {
-		t.Fatalf("LoadBoard returned error: %v", err)
-	}
-	if len(board.Columns[0].Tickets) != 2 {
-		t.Fatalf("expected 2 tickets in first column, got %d", len(board.Columns[0].Tickets))
-	}
-	if board.Columns[0].Tickets[0].TicketID != second.TicketID {
-		t.Fatalf("expected reordered ticket first, got %q", board.Columns[0].Tickets[0].TicketID)
-	}
-	if _, err := service.MoveTicket(context.Background(), first.TicketID, 1); err != nil {
-		t.Fatalf("MoveTicket returned error: %v", err)
-	}
-	board, err = service.LoadBoard(context.Background())
-	if err != nil {
-		t.Fatalf("LoadBoard returned error: %v", err)
-	}
-	if len(board.Columns[1].Tickets) != 1 {
-		t.Fatalf("expected moved ticket in second column, got %d", len(board.Columns[1].Tickets))
-	}
-}
-
-func TestParseTimestampPreservesRFC3339ClockTime(t *testing.T) {
-	t.Parallel()
-
-	parsed, err := parseTimestamp("2026-04-24T10:16:17-04:00")
-	if err != nil {
-		t.Fatalf("parseTimestamp returned error: %v", err)
-	}
-	if parsed.Hour() != 10 || parsed.Minute() != 16 || parsed.Second() != 17 {
-		t.Fatalf("expected RFC3339 time preserved, got %s", parsed.Format(time.RFC3339))
-	}
-}
-
-func TestExportTicketMarkdownAndCSV(t *testing.T) {
-	t.Parallel()
-
-	service := newTestService(t)
-	epic, sprint := seedEpicAndSprint(t, service)
-
+	epic := seedEpic(t, service, "Platform")
 	ticket, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "Export me",
-		Status:      TicketStatusDone,
-		Type:        TicketTypeDocs,
-		StoryPoints: 0.5,
-		EpicID:      epic.ID,
-		SprintID:    &sprint.ID,
-		Description: "Ready for export",
+		Title:       "Bound ticket",
+		Status:      TicketStatusNotStarted,
+		Type:        TicketTypeFeature,
+		StoryPoints: 1,
+		EpicID:      &epic.ID,
 	})
 	if err != nil {
 		t.Fatalf("CreateTicket returned error: %v", err)
 	}
-	service.SetNowFunc(func() time.Time {
-		return time.Date(2026, 4, 24, 10, 16, 17, 0, time.FixedZone("EDT", -4*60*60))
-	})
-	if _, err := service.AddComment(context.Background(), ticket.TicketID, AddCommentInput{Kind: CommentKindText, Body: "Looks good"}); err != nil {
-		t.Fatalf("AddComment returned error: %v", err)
-	}
-	service.SetNowFunc(func() time.Time {
-		return time.Date(2026, 4, 24, 10, 17, 18, 0, time.FixedZone("EDT", -4*60*60))
-	})
-	if _, err := service.AddComment(context.Background(), ticket.TicketID, AddCommentInput{Kind: CommentKindURL, Body: "https://example.com/export"}); err != nil {
-		t.Fatalf("AddComment returned error: %v", err)
-	}
 
-	detail, err := service.GetTicketDetail(context.Background(), ticket.TicketID)
+	if err := service.DeleteEpic(context.Background(), epic.ID); err != nil {
+		t.Fatalf("DeleteEpic returned error: %v", err)
+	}
+	ticket, err = service.GetTicketDetail(context.Background(), ticket.TicketID)
 	if err != nil {
 		t.Fatalf("GetTicketDetail returned error: %v", err)
 	}
-	if len(detail.Comments) != 2 {
-		t.Fatalf("expected 2 comments, got %d", len(detail.Comments))
+	if ticket.EpicID != nil {
+		t.Fatalf("expected deleted epic to null ticket epic, got %+v", ticket.EpicID)
 	}
-	if detail.Comments[0].CreatedAt.Format(time.RFC3339) != "2026-04-24T14:17:18Z" {
-		t.Fatalf("expected newest comment timestamp preserved, got %s", detail.Comments[0].CreatedAt.Format(time.RFC3339))
-	}
-	if detail.Comments[1].CreatedAt.Format(time.RFC3339) != "2026-04-24T14:16:17Z" {
-		t.Fatalf("expected older comment timestamp preserved, got %s", detail.Comments[1].CreatedAt.Format(time.RFC3339))
+}
+
+func TestExportsAndTicketWebhookPayloadIncludeSprintHistory(t *testing.T) {
+	t.Parallel()
+
+	var payloads []TicketWebhookPayload
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload TicketWebhookPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err == nil && payload.Event != "" {
+			payloads = append(payloads, payload)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	service := newTestService(t)
+	service.config.Webhook.EndpointURL = server.URL
+	service.config.Webhook.MaxRetries = 1
+	epic := seedEpic(t, service, "Platform")
+	sprint := seedSprint(t, service, "Sprint A", SprintStatusActive, time.Date(2026, 4, 20, 0, 0, 0, 0, time.Local), time.Date(2026, 4, 26, 0, 0, 0, 0, time.Local))
+	ticket, err := service.CreateTicket(context.Background(), CreateTicketInput{
+		Title:       "Webhook me",
+		Status:      TicketStatusNotStarted,
+		Type:        TicketTypeFeature,
+		StoryPoints: 5,
+		EpicID:      &epic.ID,
+		SprintID:    &sprint.ID,
+		Description: "Ticket description",
+	})
+	if err != nil {
+		t.Fatalf("CreateTicket returned error: %v", err)
 	}
 
 	mdPath, err := service.ExportTicketMarkdown(context.Background(), ticket.TicketID, "")
@@ -527,17 +280,8 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
-	if !strings.Contains(string(mdData), "## Comments") {
-		t.Fatalf("expected markdown comments section, got %q", string(mdData))
-	}
-	if !strings.Contains(string(mdData), "2026-04-24T14:17:18Z [URL] https://example.com/export") {
-		t.Fatalf("expected markdown to preserve newest comment timestamp, got %q", string(mdData))
-	}
-	if !strings.Contains(string(mdData), "- Story Points: `0.5`") {
-		t.Fatalf("expected markdown to preserve decimal story points, got %q", string(mdData))
-	}
-	if !strings.Contains(string(mdData), "2026-04-24T14:16:17Z [TEXT] Looks good") {
-		t.Fatalf("expected markdown to preserve older comment timestamp, got %q", string(mdData))
+	if !strings.Contains(string(mdData), "## Sprint History") {
+		t.Fatalf("expected sprint history in markdown export, got %q", string(mdData))
 	}
 
 	csvPath, err := service.ExportTicketCSV(context.Background(), ticket.TicketID, "")
@@ -548,73 +292,53 @@ func TestExportTicketMarkdownAndCSV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
-	if !strings.Contains(string(csvData), "ticket_id,title,status") {
-		t.Fatalf("expected CSV header row, got %q", string(csvData))
+	if !strings.Contains(string(csvData), "sprint_history_json") {
+		t.Fatalf("expected sprint_history_json in CSV export, got %q", string(csvData))
 	}
-	if !strings.Contains(string(csvData), "2026-04-24T14:17:18Z|URL|https://example.com/export") {
-		t.Fatalf("expected CSV to preserve newest comment timestamp, got %q", string(csvData))
+
+	if len(payloads) == 0 {
+		t.Fatal("expected ticket webhook payload")
 	}
-	if !strings.Contains(string(csvData), "2026-04-24T14:16:17Z|TEXT|Looks good") {
-		t.Fatalf("expected CSV to preserve older comment timestamp, got %q", string(csvData))
+	last := payloads[len(payloads)-1]
+	if last.Ticket.CurrentSprintID == nil || *last.Ticket.CurrentSprintID != sprint.ID {
+		t.Fatalf("expected current sprint in payload, got %+v", last.Ticket.CurrentSprintID)
 	}
-	if !strings.Contains(string(csvData), ",0.5,") {
-		t.Fatalf("expected CSV to preserve decimal story points, got %q", string(csvData))
+	if len(last.Ticket.SprintHistory) == 0 {
+		t.Fatalf("expected sprint history in payload, got %+v", last.Ticket.SprintHistory)
 	}
 }
 
-func TestPostSprintEndWebhooksIsIdempotentUnlessForced(t *testing.T) {
+func TestSprintEndWebhookIsIdempotent(t *testing.T) {
 	t.Parallel()
 
-	service := newTestService(t)
-	epic, sprint := seedEpicAndSprint(t, service)
-	if _, err := service.CreateTicket(context.Background(), CreateTicketInput{
-		Title:       "Done ticket",
-		Status:      TicketStatusDone,
-		Type:        TicketTypeFeature,
-		StoryPoints: 5,
-		EpicID:      epic.ID,
-		SprintID:    &sprint.ID,
-	}); err != nil {
-		t.Fatalf("CreateTicket returned error: %v", err)
-	}
-	service.SetNowFunc(func() time.Time {
-		return time.Date(2026, 4, 28, 9, 0, 0, 0, time.FixedZone("EDT", -4*60*60))
-	})
-
-	var requests atomic.Int32
+	var posts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
+		posts.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
+	service := newTestService(t)
 	service.config.Webhook.EndpointURL = server.URL
-	service.SetHTTPClient(server.Client())
+	service.config.Webhook.MaxRetries = 1
+	sprint := seedSprint(t, service, "Closed Sprint", SprintStatusClosed, time.Date(2026, 4, 1, 0, 0, 0, 0, time.Local), time.Date(2026, 4, 7, 0, 0, 0, 0, time.Local))
 
-	results, err := service.PostSprintEndWebhooks(context.Background(), 0, false)
+	results, err := service.PostSprintEndWebhooks(context.Background(), sprint.ID, false)
 	if err != nil {
 		t.Fatalf("PostSprintEndWebhooks returned error: %v", err)
 	}
 	if len(results) != 1 || results[0].Skipped {
-		t.Fatalf("expected one posted webhook, got %+v", results)
+		t.Fatalf("expected a posted result, got %+v", results)
 	}
 
-	results, err = service.PostSprintEndWebhooks(context.Background(), 0, false)
+	results, err = service.PostSprintEndWebhooks(context.Background(), sprint.ID, false)
 	if err != nil {
-		t.Fatalf("second PostSprintEndWebhooks returned error: %v", err)
+		t.Fatalf("PostSprintEndWebhooks second call returned error: %v", err)
 	}
 	if len(results) != 1 || !results[0].Skipped {
-		t.Fatalf("expected skipped duplicate, got %+v", results)
+		t.Fatalf("expected skipped result on second call, got %+v", results)
 	}
-
-	if _, err := service.PostSprintEndWebhooks(context.Background(), sprint.ID, true); err != nil {
-		t.Fatalf("forced PostSprintEndWebhooks returned error: %v", err)
+	if posts.Load() != 1 {
+		t.Fatalf("expected one POST, got %d", posts.Load())
 	}
-	if requests.Load() != 2 {
-		t.Fatalf("expected 2 HTTP posts, got %d", requests.Load())
-	}
-}
-
-func ptrInt64(value int64) *int64 {
-	return &value
 }

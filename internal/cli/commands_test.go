@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,15 +55,16 @@ func seedCLIEnvironment(t *testing.T, configContents string) (platform.Paths, *k
 
 func seedTicketData(t *testing.T, service *kanban.Service) kanban.TicketDetail {
 	t.Helper()
-	epic, err := service.CreateEpic(context.Background(), kanban.CreateEpicInput{Name: "Lemon Squeezer Backend"})
+	epic, err := service.CreateEpic(context.Background(), kanban.CreateEpicInput{Title: "Lemon Squeezer Backend"})
 	if err != nil {
 		t.Fatalf("CreateEpic returned error: %v", err)
 	}
 	sprint, err := service.CreateSprint(context.Background(), kanban.CreateSprintInput{
-		Name:      "26Q2 Sprint 2",
-		Quarter:   "2026Q2",
-		StartDate: time.Date(2024, 4, 20, 0, 0, 0, 0, time.Local),
-		EndDate:   time.Date(2024, 4, 26, 0, 0, 0, 0, time.Local),
+		Name:     "26Q2 Sprint 2",
+		Goal:     "Ship exports",
+		Status:   kanban.SprintStatusClosed,
+		StartsOn: time.Date(2024, 4, 20, 0, 0, 0, 0, time.Local),
+		EndsOn:   time.Date(2024, 4, 26, 0, 0, 0, 0, time.Local),
 	})
 	if err != nil {
 		t.Fatalf("CreateSprint returned error: %v", err)
@@ -72,7 +74,7 @@ func seedTicketData(t *testing.T, service *kanban.Service) kanban.TicketDetail {
 		Status:      kanban.TicketStatusDone,
 		Type:        kanban.TicketTypeFeature,
 		StoryPoints: 5,
-		EpicID:      epic.ID,
+		EpicID:      &epic.ID,
 		SprintID:    &sprint.ID,
 		Description: "Ticket description",
 	})
@@ -104,7 +106,7 @@ func TestExportTicketCommandWritesDefaultMarkdownFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile returned error: %v", err)
 	}
-	if !strings.Contains(string(data), "## Comments") {
+	if !strings.Contains(string(data), "## Sprint History") {
 		t.Fatalf("expected markdown export content, got %q", string(data))
 	}
 	if !strings.Contains(stdout.String(), expectedPath) {
@@ -121,19 +123,24 @@ func TestWebhookSprintEndCommandPostsAndPrintsResult(t *testing.T) {
 	defer server.Close()
 
 	_, service := seedCLIEnvironment(t, "app:\n  timezone: America/New_York\nwebhook:\n  endpoint_url: "+server.URL+"\n  timeout_seconds: 2\n  max_retries: 1\n  retry_backoff_seconds: 1\n")
-	_ = seedTicketData(t, service)
+	ticket := seedTicketData(t, service)
+	detail, err := service.GetTicketDetail(context.Background(), ticket.TicketID)
+	if err != nil {
+		t.Fatalf("GetTicketDetail returned error: %v", err)
+	}
+	before := posts.Load()
 
 	cmd := NewRootCommand()
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stdout)
-	cmd.SetArgs([]string{"webhook", "sprint-end"})
+	cmd.SetArgs([]string{"webhook", "sprint-end", "--sprint", fmt.Sprintf("%d", detail.SprintHistory[0].SprintID)})
 
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("Execute returned error: %v", err)
 	}
-	if posts.Load() != 1 {
-		t.Fatalf("expected 1 webhook POST, got %d", posts.Load())
+	if posts.Load()-before != 1 {
+		t.Fatalf("expected 1 webhook POST from command, got %d", posts.Load()-before)
 	}
 	if !strings.Contains(stdout.String(), "posted sprint") {
 		t.Fatalf("expected command output to mention posted sprint, got %q", stdout.String())

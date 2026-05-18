@@ -21,12 +21,13 @@ const (
 	routeBoard route = iota
 	routeSprints
 	routeTickets
+	routeEpics
 	routeExport
 	routeCreateTicket
 	routeTicketDetail
 )
 
-var navRoutes = []route{routeBoard, routeSprints, routeTickets, routeExport}
+var navRoutes = []route{routeBoard, routeSprints, routeTickets, routeEpics, routeExport}
 
 type inputMode int
 
@@ -37,6 +38,7 @@ const (
 
 type service interface {
 	LoadBoard(ctx context.Context) (kanban.BoardData, error)
+	LoadBoardWithScope(ctx context.Context, scope kanban.BoardScope) (kanban.BoardData, error)
 	ListTickets(ctx context.Context, filters kanban.TicketListFilters) (kanban.TicketListResult, error)
 	GetTicketDetail(ctx context.Context, ticketID string) (kanban.TicketDetail, error)
 	CreateTicket(ctx context.Context, input kanban.CreateTicketInput) (kanban.TicketDetail, error)
@@ -44,8 +46,20 @@ type service interface {
 	MoveTicket(ctx context.Context, ticketID string, delta int) (kanban.TicketDetail, error)
 	AddComment(ctx context.Context, ticketID string, input kanban.AddCommentInput) (kanban.TicketComment, error)
 	EnsureCreateEpic(ctx context.Context) (kanban.Epic, error)
+	CreateEpic(ctx context.Context, input kanban.CreateEpicInput) (kanban.Epic, error)
+	UpdateEpic(ctx context.Context, id int64, input kanban.UpdateEpicInput) (kanban.Epic, error)
 	ListEpics(ctx context.Context) ([]kanban.Epic, error)
+	AssignEpicToTicket(ctx context.Context, ticketID string, epicID int64) (kanban.TicketDetail, error)
+	ClearEpicForTicket(ctx context.Context, ticketID string) (kanban.TicketDetail, error)
+	CreateSprint(ctx context.Context, input kanban.CreateSprintInput) (kanban.Sprint, error)
+	UpdateSprint(ctx context.Context, id int64, input kanban.UpdateSprintInput) (kanban.Sprint, error)
 	ListSprints(ctx context.Context, filters kanban.SprintListFilters) ([]kanban.SprintSummary, error)
+	ActivateSprint(ctx context.Context, id int64) (kanban.Sprint, error)
+	GetActiveSprint(ctx context.Context) (*kanban.Sprint, error)
+	ListIncompleteSprintTickets(ctx context.Context, sprintID int64) ([]kanban.Ticket, error)
+	CloseSprint(ctx context.Context, id int64, input kanban.CloseSprintInput) (kanban.Sprint, error)
+	AddTicketToActiveSprint(ctx context.Context, ticketID string) (kanban.TicketDetail, error)
+	RemoveTicketFromActiveSprint(ctx context.Context, ticketID string) (kanban.TicketDetail, error)
 	ExportTicketMarkdown(ctx context.Context, ticketID string, outPath string) (string, error)
 	ExportTicketCSV(ctx context.Context, ticketID string, outPath string) (string, error)
 }
@@ -58,6 +72,7 @@ type Dependencies struct {
 
 type boardFilter struct {
 	blockedOnly bool
+	scope       kanban.BoardScope
 }
 
 type boardModel struct {
@@ -89,6 +104,124 @@ type detailModel struct {
 
 type exportModel struct {
 	format string
+}
+
+type pickerKind int
+
+const (
+	pickerKindNone pickerKind = iota
+	pickerKindCreateTicket
+	pickerKindEpicAssignment
+	pickerKindSprintMembership
+	pickerKindSprintActivate
+	pickerKindSprintCloseTarget
+)
+
+type pickerItem struct {
+	key         string
+	label       string
+	description string
+	valueID     int64
+	selected    bool
+	disabled    bool
+}
+
+type pickerModel struct {
+	kind         pickerKind
+	title        string
+	emptyMessage string
+	query        string
+	focused      int
+	editingQuery bool
+	items        []pickerItem
+	ticketID     string
+	allowClear   bool
+}
+
+type sprintModal int
+
+const (
+	sprintModalNone sprintModal = iota
+	sprintModalForm
+	sprintModalCloseWizard
+	sprintModalPicker
+)
+
+type sprintFormModel struct {
+	editID       int64
+	title        string
+	name         string
+	goal         string
+	startsOn     string
+	endsOn       string
+	focusedField int
+	editingField bool
+	editingValue string
+	errors       map[int]string
+}
+
+type sprintCloseMode int
+
+const (
+	sprintCloseUsePlanned sprintCloseMode = iota
+	sprintCloseCreateNew
+)
+
+type sprintCloseWizardModel struct {
+	sprint             kanban.SprintSummary
+	mode               sprintCloseMode
+	focusedSection     int
+	focusedTicket      int
+	selectedNextSprint int64
+	createName         string
+	createGoal         string
+	createStartsOn     string
+	createEndsOn       string
+	incompleteTickets  []kanban.Ticket
+	selectedCarryOver  map[string]bool
+	errors             map[string]string
+}
+
+type sprintsModel struct {
+	focusedRow int
+	summaries  []kanban.SprintSummary
+	modal      sprintModal
+	form       sprintFormModel
+	close      sprintCloseWizardModel
+	picker     pickerModel
+}
+
+type epicModal int
+
+const (
+	epicModalNone epicModal = iota
+	epicModalForm
+	epicModalPicker
+)
+
+type epicFormModel struct {
+	editID       int64
+	title        string
+	status       kanban.EpicStatus
+	color        string
+	focusedField int
+	editingField bool
+	editingValue string
+	errors       map[int]string
+}
+
+type epicsModel struct {
+	focusedRow int
+	epics      []kanban.Epic
+	modal      epicModal
+	form       epicFormModel
+	picker     pickerModel
+}
+
+type paletteModel struct {
+	open  bool
+	query string
+	focus int
 }
 
 type createTicketModel struct {
@@ -139,6 +272,9 @@ type Model struct {
 	tickets        ticketsModel
 	detail         detailModel
 	export         exportModel
+	sprints        sprintsModel
+	palette        paletteModel
+	epics          epicsModel
 	create         createTicketModel
 	selectedTicket *kanban.TicketDetail
 	statusMessage  string
@@ -153,10 +289,14 @@ func NewModel(deps Dependencies) Model {
 		activeRoute:   routeBoard,
 		previousRoute: routeBoard,
 		mode:          modeNormal,
+		palette:       paletteModel{},
 		export:        exportModel{format: "md"},
 	}
+	m.board.filter.scope = kanban.BoardScopeSprint
 	m.refreshBoard("")
 	m.refreshTickets()
+	m.refreshSprints()
+	m.refreshEpics()
 	return m
 }
 
@@ -198,6 +338,10 @@ func (m Model) handleKey(msg tea.KeyMsg) Model {
 		return m.handleCreateTicketNormalKey(msg)
 	}
 
+	if m.palette.open {
+		return m.handlePaletteKey(msg)
+	}
+
 	switch msg.String() {
 	case "1":
 		m.activeRoute = routeBoard
@@ -205,6 +349,7 @@ func (m Model) handleKey(msg tea.KeyMsg) Model {
 		return m
 	case "2":
 		m.activeRoute = routeSprints
+		m.refreshSprints()
 		m.mode = modeNormal
 		return m
 	case "3":
@@ -212,8 +357,29 @@ func (m Model) handleKey(msg tea.KeyMsg) Model {
 		m.mode = modeNormal
 		return m
 	case "4":
+		m.activeRoute = routeEpics
+		m.refreshEpics()
+		m.mode = modeNormal
+		return m
+	case "5":
 		m.activeRoute = routeExport
 		m.mode = modeNormal
+		return m
+	case "S":
+		m.activeRoute = routeSprints
+		m.refreshSprints()
+		m.mode = modeNormal
+		return m
+	case "E":
+		m.activeRoute = routeEpics
+		m.refreshEpics()
+		m.mode = modeNormal
+		return m
+	case ":":
+		m.palette.open = true
+		m.palette.query = ""
+		m.palette.focus = 0
+		m.statusMessage = "Command palette"
 		return m
 	}
 
@@ -226,6 +392,10 @@ func (m Model) handleKey(msg tea.KeyMsg) Model {
 		return m.handleDetailNormalKey(msg)
 	case routeExport:
 		return m.handleExportNormalKey(msg)
+	case routeEpics:
+		return m.handleEpicsNormalKey(msg)
+	case routeSprints:
+		return m.handleSprintsNormalKey(msg)
 	default:
 		return m
 	}
@@ -283,6 +453,14 @@ func (m Model) activeBuffer() string {
 		return m.create.editingValue
 	case m.activeRoute == routeCreateTicket && m.create.picker.editingQuery:
 		return m.create.picker.query
+	case m.activeRoute == routeSprints && m.sprints.modal == sprintModalForm && m.sprints.form.editingField:
+		return m.sprints.form.editingValue
+	case m.activeRoute == routeSprints && m.sprints.modal == sprintModalPicker && m.sprints.picker.editingQuery:
+		return m.sprints.picker.query
+	case m.activeRoute == routeEpics && m.epics.modal == epicModalForm && m.epics.form.editingField:
+		return m.epics.form.editingValue
+	case m.activeRoute == routeEpics && m.epics.modal == epicModalPicker && m.epics.picker.editingQuery:
+		return m.epics.picker.query
 	default:
 		return ""
 	}
@@ -303,6 +481,16 @@ func (m *Model) updateActiveBuffer(value string) {
 	case m.activeRoute == routeCreateTicket && m.create.picker.editingQuery:
 		m.create.picker.query = value
 		m.normalizeCreatePickerFocus(len(m.filteredCreatePickerItems()))
+	case m.activeRoute == routeSprints && m.sprints.modal == sprintModalForm && m.sprints.form.editingField:
+		m.sprints.form.editingValue = value
+	case m.activeRoute == routeSprints && m.sprints.modal == sprintModalPicker && m.sprints.picker.editingQuery:
+		m.sprints.picker.query = value
+		m.normalizePickerFocus(&m.sprints.picker)
+	case m.activeRoute == routeEpics && m.epics.modal == epicModalForm && m.epics.form.editingField:
+		m.epics.form.editingValue = value
+	case m.activeRoute == routeEpics && m.epics.modal == epicModalPicker && m.epics.picker.editingQuery:
+		m.epics.picker.query = value
+		m.normalizePickerFocus(&m.epics.picker)
 	}
 }
 
@@ -314,6 +502,12 @@ func (m *Model) cancelEdit() {
 	case m.activeRoute == routeTicketDetail && m.detail.editingField:
 		m.detail.editingValue = m.detail.originalValue
 		m.detail.editingField = false
+	case m.activeRoute == routeSprints && m.sprints.modal == sprintModalForm && m.sprints.form.editingField:
+		m.sprints.form.editingField = false
+		m.sprints.form.editingValue = ""
+	case m.activeRoute == routeEpics && m.epics.modal == epicModalForm && m.epics.form.editingField:
+		m.epics.form.editingField = false
+		m.epics.form.editingValue = ""
 	}
 }
 
@@ -329,6 +523,10 @@ func (m Model) commitEdit() Model {
 		return m.commitDetailEdit()
 	case m.activeRoute == routeCreateTicket:
 		return m.commitCreateInsert()
+	case m.activeRoute == routeSprints && m.sprints.modal == sprintModalForm:
+		return m.commitSprintFormInsert()
+	case m.activeRoute == routeEpics && m.epics.modal == epicModalForm:
+		return m.commitEpicFormInsert()
 	default:
 		return m
 	}
@@ -352,11 +550,47 @@ func (m *Model) refreshSupportData() {
 	}
 }
 
+func (m *Model) refreshSprints() {
+	if m.service == nil {
+		return
+	}
+	summaries, err := m.service.ListSprints(context.Background(), kanban.SprintListFilters{})
+	if err != nil {
+		m.errorMessage = err.Error()
+		return
+	}
+	m.errorMessage = ""
+	m.sprints.summaries = summaries
+	if m.sprints.focusedRow >= len(summaries) {
+		m.sprints.focusedRow = max(0, len(summaries)-1)
+	}
+}
+
+func (m *Model) refreshEpics() {
+	if m.service == nil {
+		return
+	}
+	epics, err := m.service.ListEpics(context.Background())
+	if err != nil {
+		m.errorMessage = err.Error()
+		return
+	}
+	m.errorMessage = ""
+	m.epics.epics = epics
+	if m.epics.focusedRow >= len(epics) {
+		m.epics.focusedRow = max(0, len(epics)-1)
+	}
+}
+
 func (m *Model) refreshBoard(preferTicketID string) {
 	if m.service == nil {
 		return
 	}
-	boardData, err := m.service.LoadBoard(context.Background())
+	scope := m.board.filter.scope
+	if scope == "" {
+		scope = kanban.BoardScopeSprint
+	}
+	boardData, err := m.service.LoadBoardWithScope(context.Background(), scope)
 	if err != nil {
 		m.errorMessage = err.Error()
 		return
@@ -580,6 +814,8 @@ func routeTitle(r route) string {
 		return "Sprints"
 	case routeTickets:
 		return "Tickets"
+	case routeEpics:
+		return "Epics"
 	case routeExport:
 		return "Export"
 	case routeCreateTicket:
@@ -612,9 +848,14 @@ func renderHeader(width int, active route, search string, filter boardFilter) st
 	if filter.blockedOnly {
 		filterLabel = "Blocked"
 	}
+	scopeLabel := "Backlog"
+	if filter.scope == kanban.BoardScopeSprint {
+		scopeLabel = "Sprint"
+	}
 	right := lipgloss.JoinVertical(
 		lipgloss.Right,
 		tabStyle.Render("s Search: "+search),
+		tabStyle.Render("b Scope: "+scopeLabel),
 		tabStyle.Render("f Filter: "+filterLabel),
 	)
 	leftWidth := max(0, width-lipgloss.Width(right)-2)
@@ -627,14 +868,18 @@ func renderFooter(width int, active route, mode inputMode, status, errText strin
 	if mode == modeInsert {
 		modeText = "INSERT"
 	}
-	help := "1-4 routes  q quit"
+	help := "1-5 routes  q quit"
 	switch active {
 	case routeBoard:
-		help = "h/l columns  j/k tickets  H/L move ticket  n create  s search  f blocked filter  Enter detail"
+		help = "h/l columns  j/k tickets  H/L move ticket  m sprint action  n create  s search  b scope  f blocked filter  Enter detail"
+	case routeSprints:
+		help = "j/k rows  n create  e edit  a activate  c close  Enter action  : palette"
 	case routeTickets:
 		help = "j/k rows  h/l columns  i edit  n create  Enter detail"
 	case routeTicketDetail:
-		help = "j/k fields  i edit  Enter save  Esc back/cancel"
+		help = "j/k fields  e/i edit or open picker  Enter save/open  Esc back/cancel"
+	case routeEpics:
+		help = "j/k rows  n create  e edit  : palette"
 	case routeExport:
 		help = "h/l format  Enter export"
 	case routeCreateTicket:
@@ -664,13 +909,18 @@ func renderPlaceholderPanel(width, height int, title, body string) string {
 }
 
 func (m Model) renderBody(height int) string {
+	if m.palette.open {
+		return m.paletteView(m.width, height)
+	}
 	switch m.activeRoute {
 	case routeBoard:
 		return m.boardView(m.width, height)
 	case routeTickets:
 		return m.ticketsView(m.width, height)
 	case routeSprints:
-		return renderPlaceholderPanel(m.width, height, "Sprints", "MVP placeholder. Active sprint data is surfaced on the board.")
+		return m.sprintsView(m.width, height)
+	case routeEpics:
+		return m.epicsView(m.width, height)
 	case routeExport:
 		return m.exportView(m.width, height)
 	case routeCreateTicket:
@@ -679,6 +929,138 @@ func (m Model) renderBody(height int) string {
 		return m.detailView(m.width, height)
 	default:
 		return renderPlaceholderPanel(m.width, height, "Unknown Route", "")
+	}
+}
+
+func (m Model) handlePaletteKey(msg tea.KeyMsg) Model {
+	commands := m.filteredPaletteCommands()
+	switch msg.String() {
+	case "esc":
+		m.palette.open = false
+		return m
+	case "backspace":
+		if m.palette.query != "" {
+			m.palette.query = trimLastRune(m.palette.query)
+			m.palette.focus = 0
+		}
+		return m
+	case "j", "down":
+		if m.palette.focus < len(commands)-1 {
+			m.palette.focus++
+		}
+		return m
+	case "k", "up":
+		if m.palette.focus > 0 {
+			m.palette.focus--
+		}
+		return m
+	case "enter":
+		if len(commands) == 0 {
+			return m
+		}
+		m = m.executePaletteCommand(commands[m.palette.focus])
+		m.palette.open = false
+		return m
+	}
+	if msg.Type == tea.KeyRunes {
+		m.palette.query += string(msg.Runes)
+		m.palette.focus = 0
+	}
+	return m
+}
+
+func (m Model) filteredPaletteCommands() []string {
+	commands := []string{
+		"sprint.create",
+		"sprint.view",
+		"sprint.edit",
+		"sprint.activate",
+		"sprint.close",
+		"epic.create",
+		"epic.edit",
+		"epic.set_for_ticket",
+		"epic.clear_for_ticket",
+	}
+	query := strings.TrimSpace(strings.ToLower(m.palette.query))
+	if query == "" {
+		return commands
+	}
+	filtered := make([]string, 0, len(commands))
+	for _, command := range commands {
+		if strings.Contains(strings.ToLower(command), query) {
+			filtered = append(filtered, command)
+		}
+	}
+	return filtered
+}
+
+func (m Model) executePaletteCommand(command string) Model {
+	switch command {
+	case "sprint.create":
+		m.activeRoute = routeSprints
+		m.refreshSprints()
+		return m.openSprintForm(nil)
+	case "sprint.view":
+		m.activeRoute = routeSprints
+		m.refreshSprints()
+		m.focusSprintByStatus(kanban.SprintStatusActive)
+		return m
+	case "sprint.edit":
+		m.activeRoute = routeSprints
+		m.refreshSprints()
+		if len(m.sprints.summaries) == 0 {
+			m.errorMessage = "No sprints available"
+			return m
+		}
+		if m.activeRoute != routeSprints || !m.focusSprintByStatus(kanban.SprintStatusActive) {
+			m.sprints.focusedRow = 0
+		}
+		return m.openSprintForm(m.focusedSprintSummary())
+	case "sprint.activate":
+		m.activeRoute = routeSprints
+		m.refreshSprints()
+		if m.canActivateFocusedSprint() {
+			return m.activateFocusedSprint()
+		}
+		m.openSprintActivatePicker()
+		return m
+	case "sprint.close":
+		m.activeRoute = routeSprints
+		m.refreshSprints()
+		if !m.focusSprintByStatus(kanban.SprintStatusActive) {
+			m.errorMessage = "No active sprint to close"
+			return m
+		}
+		return m.openCloseSprintWizard()
+	case "epic.create":
+		m.activeRoute = routeEpics
+		m.refreshEpics()
+		return m.openEpicForm(nil)
+	case "epic.edit":
+		m.activeRoute = routeEpics
+		m.refreshEpics()
+		if len(m.epics.epics) == 0 {
+			m.errorMessage = "No epics available"
+			return m
+		}
+		return m.openEpicForm(m.focusedEpic())
+	case "epic.set_for_ticket":
+		if m.selectedTicket == nil {
+			m.errorMessage = "Select a ticket first"
+			return m
+		}
+		m.activeRoute = routeEpics
+		m.refreshEpics()
+		m.openEpicAssignmentPicker(m.selectedTicket.TicketID, true)
+		return m
+	case "epic.clear_for_ticket":
+		if m.selectedTicket == nil {
+			m.errorMessage = "Select a ticket first"
+			return m
+		}
+		return m.clearEpicForSelectedTicket()
+	default:
+		return m
 	}
 }
 
